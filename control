@@ -1,6 +1,6 @@
 Package: com.xtieume.gpsnav
 Name: GPSNav
-Version: 1.0.2
+Version: 1.0.3
 Architecture: iphoneos-arm
 Description: GPS location and route simulator
 Maintainer: Tieu Me

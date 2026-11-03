@@ -1,6 +1,10 @@
 #import "MapController.h"
 #import "ListSheet.h"
 #import "LogSheet.h"
+#import "TileMapView.h"
+#import <Metal/Metal.h>
+#import <Security/Security.h>
+#import <dlfcn.h>
 #import "../Shared/Log.h"
 #import <MapKit/MapKit.h>
 #import <notify.h>
@@ -10,7 +14,7 @@
 - (void)loadTileAtPath:(MKTileOverlayPath)path result:(void (^)(NSData *, NSError *))result {
   NSURL *url = [self URLForTilePath:path];
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.2" forHTTPHeaderField:@"User-Agent"];
+  [request setValue:@"GPSNav/1.0.3" forHTTPHeaderField:@"User-Agent"];
   [[[NSURLSession sharedSession]
       dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -54,6 +58,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 @property NSInteger routeTarget;
 @property GPSNavTileOverlay *tiles;
 @property UILabel *attribution;
+@property BOOL didDumpLayout;
 @end
 @implementation MapController
 - (void)viewDidLoad {
@@ -62,6 +67,11 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.view.backgroundColor = UIColor.systemBackgroundColor;
   self.config = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: NSMutableDictionary.new;
   GPSNavLog(@"Preferences read %@: %@", path, self.config);
+  if (!self.config[@"mapEngine"]) {
+    self.config[@"mapEngine"] = [self.config[@"mapTiles"] isEqual:@"Apple Maps"] ? @"Apple MapKit" : @"Built-in (OpenStreetMap)";
+    [self.config removeObjectForKey:@"mapTiles"];
+    [self.config writeToFile:path atomically:YES];
+  }
   NSDictionary *defaults = @{
     @"latitude" : @10.7769,
     @"longitude" : @106.7009,
@@ -72,7 +82,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     @"loop" : @NO,
     @"enabled" : @NO,
     @"revision" : NSUUID.UUID.UUIDString,
-    @"mapTiles" : @"OpenStreetMap",
+    @"mapEngine" : @"Built-in (OpenStreetMap)",
     @"transport" : @"automobile"
   };
   for (NSString *key in defaults)
@@ -88,25 +98,12 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.routeTarget = -1;
   self.locationManager = CLLocationManager.new;
   self.locationManager.delegate = self;
-  self.map = MKMapView.new;
-  self.map.translatesAutoresizingMaskIntoConstraints = NO;
-  self.map.delegate = self;
-  self.map.showsUserLocation = YES;
-  [self.view addSubview:self.map];
-  [NSLayoutConstraint activateConstraints:@[
-    [self.map.topAnchor constraintEqualToAnchor:self.view.topAnchor],
-    [self.map.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
-    [self.map.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
-    [self.map.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
-  ]];
   [self applyMapTiles];
   CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(
       [self.config[@"latitude"] doubleValue], [self.config[@"longitude"] doubleValue]);
   [self.map setRegion:MKCoordinateRegionMakeWithDistance(coord, 5000, 5000) animated:NO];
-  UILongPressGestureRecognizer *press =
-      [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(mapTap:)];
-  press.minimumPressDuration = 0.4;
-  [self.map addGestureRecognizer:press];
+  if (self.locationManager.authorizationStatus == kCLAuthorizationStatusNotDetermined)
+    [self.locationManager requestWhenInUseAuthorization];
   [self buildInterface];
   self.current = MKPointAnnotation.new;
   self.current.title = @"Engine position";
@@ -271,7 +268,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [controls addArrangedSubview:secondary];
   UILabel *attribution = UILabel.new;
   self.attribution = attribution;
-  attribution.hidden = [self.config[@"mapTiles"] isEqual:@"Apple Maps"];
+  attribution.hidden = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"];
   attribution.text = @"© OpenStreetMap contributors";
   attribution.font = [UIFont systemFontOfSize:10];
   attribution.textColor = UIColor.labelColor;
@@ -525,6 +522,12 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   CLLocation *location = locations.lastObject;
   if (!location)
     return;
+  if ([self.map isKindOfClass:TileMapView.class]) {
+    TileMapView *tileMap = (TileMapView *)self.map;
+    tileMap.userCoordinate = location.coordinate;
+    tileMap.hasUserCoordinate = YES;
+    [tileMap setNeedsDisplay];
+  }
   [self.map setCenterCoordinate:location.coordinate animated:YES];
   self.config[@"latitude"] = @(location.coordinate.latitude);
   self.config[@"longitude"] = @(location.coordinate.longitude);
@@ -648,6 +651,10 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   BOOL active = (flags & 1) && CLLocationCoordinate2DIsValid(CLLocationCoordinate2DMake(lat, lon));
   self.moving = active && isfinite(speed) && speed > 0;
   self.course = isfinite(course) ? course : 0;
+  if ([self.map isKindOfClass:TileMapView.class]) {
+    ((TileMapView *)self.map).course = self.course;
+    [self.map setNeedsDisplay];
+  }
   self.speedLabel.superview.superview.hidden = !self.moving;
   self.speedLabel.text = [NSString stringWithFormat:@"%.0f km/h", speed * 3.6];
   if (active) {
@@ -697,6 +704,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     [self.map addAnnotation:self.selection];
   }
   self.selection.coordinate = c;
+  [self.map setNeedsDisplay];
 }
 - (void)modeChanged {
   self.config[@"mode"] =
@@ -809,7 +817,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 }
 - (void)fetchJSON:(NSURL *)url completion:(void (^)(id, NSError *))completion {
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.2" forHTTPHeaderField:@"User-Agent"];
+  [request setValue:@"GPSNav/1.0.3" forHTTPHeaderField:@"User-Agent"];
   [[[NSURLSession sharedSession]
       dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -1285,17 +1293,17 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 - (void)settings {
   [self
       presentList:@"Settings"
-            items:@[ @"Blacklist apps", [NSString stringWithFormat:@"Map tiles: %@", self.config[@"mapTiles"]], @"About GPSNav 1.0.2" ]
+            items:@[ @"Blacklist apps", [NSString stringWithFormat:@"Map engine: %@", self.config[@"mapEngine"]], @"About GPSNav 1.0.3" ]
            symbol:@"gearshape.fill"
            select:^(NSUInteger index) {
              if (index == 0) {
                [self blacklist];
              } else if (index == 1) {
-               self.config[@"mapTiles"] = [self.config[@"mapTiles"] isEqual:@"Apple Maps"] ? @"OpenStreetMap" : @"Apple Maps";
+               self.config[@"mapEngine"] = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"] ? @"Built-in (OpenStreetMap)" : @"Apple MapKit";
                [self applyMapTiles];
                [self save:NO];
              } else {
-               [self sheet:@"GPSNav 1.0.2"
+               [self sheet:@"GPSNav 1.0.3"
                    actions:@[ [UIAlertAction
                                actionWithTitle:@"GitHub"
                                          style:UIAlertActionStyleDefault
@@ -1345,16 +1353,37 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [self presentViewController:a animated:YES completion:nil];
 }
 - (void)applyMapTiles {
-  if (self.tiles) [self.map removeOverlay:self.tiles];
-  self.tiles = nil;
-  BOOL apple = [self.config[@"mapTiles"] isEqual:@"Apple Maps"];
-  if (!apple) {
-    self.tiles = [[GPSNavTileOverlay alloc] initWithURLTemplate:@"https://tile.openstreetmap.org/{z}/{x}/{y}.png"];
-    self.tiles.canReplaceMapContent = YES;
-    [self.map addOverlay:self.tiles level:MKOverlayLevelAboveLabels];
+  MKCoordinateRegion region = self.map ? self.map.region : MKCoordinateRegionMakeWithDistance(CLLocationCoordinate2DMake(10.7769, 106.7009), 5000, 5000);
+  [self.map removeFromSuperview];
+  BOOL apple = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"];
+  self.map = apple ? MKMapView.new : (MKMapView *)TileMapView.new;
+  self.map.translatesAutoresizingMaskIntoConstraints = NO;
+  self.map.delegate = self;
+  if (apple) self.map.showsUserLocation = YES;
+  [self.view insertSubview:self.map atIndex:0];
+  [NSLayoutConstraint activateConstraints:@[
+    [self.map.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+    [self.map.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor],
+    [self.map.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+    [self.map.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
+  ]];
+  [self.map setRegion:region animated:NO];
+  if (apple) {
+    UILongPressGestureRecognizer *press = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(mapTap:)];
+    press.minimumPressDuration = 0.4;
+    [self.map addGestureRecognizer:press];
+  } else {
+    __weak typeof(self) weakSelf = self;
+    ((TileMapView *)self.map).longPressHandler = ^(CLLocationCoordinate2D coordinate) {
+      [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+      [weakSelf choose:coordinate];
+    };
   }
+  for (id annotation in @[self.selection ?: NSNull.null, self.start ?: NSNull.null, self.end ?: NSNull.null])
+    if (annotation != NSNull.null) [self.map addAnnotation:annotation];
+  if (self.line) [self.map addOverlay:self.line level:MKOverlayLevelAboveLabels];
   self.attribution.hidden = apple;
-  GPSNavLog(@"Map tiles active=%@", apple ? @"Apple Maps" : @"OpenStreetMap");
+  GPSNavLog(@"Map engine active=%@", self.config[@"mapEngine"]);
 }
 - (void)dumpMapState {
   GPSNavLog(@"Map frame=%@ hidden=%d alpha=%f window=%@ overlays=%lu annotations=%lu center=%f,%f span=%f,%f searchBar=%@", NSStringFromCGRect(self.map.frame), self.map.hidden, self.map.alpha, self.map.window, (unsigned long)self.map.overlays.count, (unsigned long)self.map.annotations.count, self.map.region.center.latitude, self.map.region.center.longitude, self.map.region.span.latitudeDelta, self.map.region.span.longitudeDelta, NSStringFromCGRect(self.searchBar.frame));
@@ -1362,16 +1391,40 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 }
 - (void)viewDidLayoutSubviews {
   [super viewDidLayoutSubviews];
-  [self dumpMapState];
+  if (!self.didDumpLayout) {
+    self.didDumpLayout = YES;
+    [self dumpMapState];
+  }
 }
 - (void)mapViewWillStartLoadingMap:(MKMapView *)mapView { GPSNavLog(@"willStartLoadingMap"); }
 - (void)mapViewDidFinishLoadingMap:(MKMapView *)mapView { GPSNavLog(@"didFinishLoadingMap"); }
-- (void)mapViewDidFailLoadingMap:(MKMapView *)mapView withError:(NSError *)error { GPSNavLog(@"didFailLoadingMap error=%@", error); }
+- (void)mapViewDidFailLoadingMap:(MKMapView *)mapView withError:(NSError *)error { GPSNavLog(@"didFailLoadingMap domain=%@ code=%ld userInfo=%@", error.domain, (long)error.code, error.userInfo); }
 - (void)mapViewWillStartRenderingMap:(MKMapView *)mapView { GPSNavLog(@"willStartRenderingMap"); }
 - (void)mapViewDidFinishRenderingMap:(MKMapView *)mapView fullyRendered:(BOOL)fullyRendered { GPSNavLog(@"didFinishRenderingMap fullyRendered=%d", fullyRendered); }
 - (void)runDiagnostics {
   GPSNavLog(@"Diagnostics started location authorization=%ld prefs=%@", (long)self.locationManager.authorizationStatus, [NSDictionary dictionaryWithContentsOfFile:path]);
   [self dumpMapState];
+  GPSNavLog(@"Metal device=%@", MTLCreateSystemDefaultDevice());
+  MKMapSnapshotOptions *options = MKMapSnapshotOptions.new;
+  options.region = self.map.region;
+  options.size = CGSizeMake(320, 320);
+  MKMapSnapshotter *snapshotter = [[MKMapSnapshotter alloc] initWithOptions:options];
+  [snapshotter startWithCompletionHandler:^(MKMapSnapshot *snapshot, NSError *error) {
+    GPSNavLog(@"Map snapshot image=%@ size=%@ error domain=%@ code=%ld userInfo=%@", snapshot.image, NSStringFromCGSize(snapshot.image.size), error.domain, (long)error.code, error.userInfo);
+  }];
+  CFTypeRef (*createTask)(CFAllocatorRef) = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
+  CFTypeRef (*copyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *) = dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
+  CFTypeRef task = createTask && copyEntitlement ? createTask(kCFAllocatorDefault) : NULL;
+  if (task) {
+    for (NSString *key in @[@"application-identifier", @"com.apple.private.security.no-container", @"get-task-allow"]) {
+      CFErrorRef error = NULL;
+      CFTypeRef value = copyEntitlement(task, (__bridge CFStringRef)key, &error);
+      GPSNavLog(@"Entitlement %@ value=%@ error=%@", key, (__bridge id)value, (__bridge id)error);
+      if (value) CFRelease(value);
+      if (error) CFRelease(error);
+    }
+    CFRelease(task);
+  }
   NSArray *names = @[@"lat", @"lon", @"flags", @"motion"];
   int tokens[] = {self.latToken, self.lonToken, self.flagsToken, self.motionToken};
   for (NSUInteger i = 0; i < names.count; i++) {
