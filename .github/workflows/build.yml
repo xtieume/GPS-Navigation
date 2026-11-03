@@ -46,3 +46,41 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: packages/*.deb
+  sileo-repo:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: GPSNav-*
+          path: repo/debs
+          merge-multiple: true
+      - name: Build APT index
+        working-directory: repo
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq dpkg-dev apt-utils
+          dpkg-scanpackages -m debs /dev/null > Packages
+          bzip2 -kf Packages && gzip -kf Packages && xz -kf Packages
+          apt-ftparchive \
+            -o APT::FTPArchive::Release::Origin="GPSNav" \
+            -o APT::FTPArchive::Release::Label="GPSNav" \
+            -o APT::FTPArchive::Release::Suite="stable" \
+            -o APT::FTPArchive::Release::Version="1.0" \
+            -o APT::FTPArchive::Release::Codename="ios" \
+            -o APT::FTPArchive::Release::Architectures="iphoneos-arm iphoneos-arm64" \
+            -o APT::FTPArchive::Release::Components="main" \
+            -o APT::FTPArchive::Release::Description="GPSNav tweak repository" \
+            release . > Release
+          echo '<h1>GPSNav repo</h1><p>Add <code>https://xtieume.github.io/GPS-Navigation/</code> to Sileo.</p>' > index.html
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: repo
+      - id: deploy
+        uses: actions/deploy-pages@v4
