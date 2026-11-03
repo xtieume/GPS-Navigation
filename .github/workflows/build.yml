@@ -79,7 +79,7 @@ jobs:
             -o APT::FTPArchive::Release::Components="main" \
             -o APT::FTPArchive::Release::Description="GPSNav tweak repository" \
             release . > Release
-          cp ../site/index.html .
+          cp ../site/* .
       - uses: actions/upload-pages-artifact@v3
         with:
           path: repo

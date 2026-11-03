@@ -15,6 +15,8 @@
   p { margin: 0 0 16px; color: var(--muted); }
   a.btn { display: block; text-align: center; text-decoration: none; font-weight: 600; padding: 14px; border-radius: 12px; margin-bottom: 10px; background: var(--accent); color: #fff; }
   a.btn.alt { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .qr { display: block; width: 200px; height: 200px; margin: 0 auto 8px; background: #fff; padding: 8px; border-radius: 12px; }
+  .hint { text-align: center; font-size: 14px; }
   code { display: block; word-break: break-all; padding: 10px; border-radius: 8px; background: var(--bg); margin-bottom: 16px; }
 </style>
 </head>
@@ -23,6 +25,8 @@
   <div class="card">
     <h1>GPSNav</h1>
     <p>GPS location spoofer for jailbroken iOS 16+ (rootless &amp; rootful).</p>
+    <img class="qr" src="qr.svg" alt="QR code for https://xtieume.github.io/GPS-Navigation/">
+    <p class="hint">Scan with your iPhone camera to open this page, then tap Add to Sileo.</p>
     <code>https://xtieume.github.io/GPS-Navigation/</code>
     <a class="btn" href="sileo://source/https://xtieume.github.io/GPS-Navigation/">Add to Sileo</a>
     <a class="btn alt" href="zbra://sources/add/https://xtieume.github.io/GPS-Navigation/">Add to Zebra</a>
