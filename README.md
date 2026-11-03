@@ -11,7 +11,7 @@ GPSNav is a location simulator for jailbroken iOS 16.0 and later on arm64/arm64e
 
 ## Install
 
-Add the Sileo source `https://xtieume.github.io/GPS-Navigation/` and install **GPSNav**, or install the deb manually:
+Add the Sileo source `https://xtieume.github.io/gps-navigation/` and install **GPSNav**, or install the deb manually:
 
 Choose the rootless `iphoneos-arm64` or rootful `iphoneos-arm` deb for your jailbreak. Transfer it to the device and install with Sileo or Filza. Respring to load the tweak into SpringBoard and restart target apps. Enable tweak injection in the jailbreak if required. Remove the package with your package manager.
 
