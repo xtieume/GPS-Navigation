@@ -1,6 +1,6 @@
 include $(THEOS)/makefiles/common.mk
 APPLICATION_NAME = GPSNav
-GPSNav_FILES = main.m MapController.m
+GPSNav_FILES = main.m MapController.m ListSheet.m
 GPSNav_FRAMEWORKS = UIKit MapKit CoreLocation
 GPSNav_CFLAGS = -fobjc-arc
 GPSNav_CODESIGN_FLAGS = -Sentitlements.plist
