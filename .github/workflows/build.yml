@@ -57,6 +57,7 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: GPSNav-*
@@ -78,7 +79,7 @@ jobs:
             -o APT::FTPArchive::Release::Components="main" \
             -o APT::FTPArchive::Release::Description="GPSNav tweak repository" \
             release . > Release
-          echo '<h1>GPSNav repo</h1><p>Add <code>https://xtieume.github.io/GPS-Navigation/</code> to Sileo.</p>' > index.html
+          cp ../site/index.html .
       - uses: actions/upload-pages-artifact@v3
         with:
           path: repo
