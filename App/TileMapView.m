@@ -7,6 +7,8 @@
 @property NSCache *cache;
 @property NSMutableDictionary *requests;
 @property NSMutableDictionary *retryAfter;
+@property NSMutableSet *diskLoads;
+@property CFTimeInterval lastGestureDraw;
 @property NSURLSession *session;
 @property CGPoint panCenter;
 @property double pinchZoom;
@@ -28,6 +30,7 @@
   _cache.countLimit = 300;
   _requests = NSMutableDictionary.new;
   _retryAfter = NSMutableDictionary.new;
+  _diskLoads = NSMutableSet.new;
   NSURLSessionConfiguration *config = NSURLSessionConfiguration.defaultSessionConfiguration;
   config.HTTPMaximumConnectionsPerHost = 6;
   _session = [NSURLSession sessionWithConfiguration:config];
@@ -112,6 +115,33 @@
     if (t >= 1) [timer invalidate];
   }];
 }
+- (void)setCenterCoordinate:(CLLocationCoordinate2D)coordinate zoom:(double)zoom animated:(BOOL)animated {
+  zoom = fmax(2, fmin(19, zoom));
+  NSUInteger generation = ++self.animationGeneration;
+  if (!animated) { _centerCoordinate = coordinate; _zoom = zoom; [self changed]; return; }
+  double x = gps_x(self.centerCoordinate.longitude), y = gps_y(self.centerCoordinate.latitude);
+  double dx = gps_x(coordinate.longitude) - x; dx -= round(dx);
+  double dy = gps_y(coordinate.latitude) - y, initialZoom = self.zoom;
+  CFTimeInterval start = CACurrentMediaTime();
+  __weak typeof(self) weakSelf = self;
+  [NSTimer scheduledTimerWithTimeInterval:1.0 / 30 repeats:YES block:^(NSTimer *timer) {
+    TileMapView *map = weakSelf;
+    if (!map || map.animationGeneration != generation) { [timer invalidate]; return; }
+    double t = fmin(1, (CACurrentMediaTime() - start) / 0.25); t = t * (2 - t);
+    double currentX = x + dx * t;
+    map->_centerCoordinate = CLLocationCoordinate2DMake(gps_lat(y + dy * t), gps_lon(currentX - floor(currentX)));
+    map->_zoom = initialZoom + (zoom - initialZoom) * t;
+    [map changed];
+    if (t >= 1) [timer invalidate];
+  }];
+}
+- (void)gestureChanged:(UIGestureRecognizer *)gesture {
+  CFTimeInterval now = CACurrentMediaTime();
+  if (gesture.state != UIGestureRecognizerStateChanged || now - self.lastGestureDraw >= 1.0 / 30.0) {
+    self.lastGestureDraw = now;
+    [self changed];
+  }
+}
 - (MKCoordinateRegion)region {
   CLLocationCoordinate2D a = [self convertPoint:CGPointZero toCoordinateFromView:self];
   CLLocationCoordinate2D b = [self convertPoint:CGPointMake(self.bounds.size.width, self.bounds.size.height) toCoordinateFromView:self];
@@ -147,13 +177,16 @@
   return CLLocationCoordinate2DMake(gps_lat(fmax(0, fmin(1, y))), gps_lon(x - floor(x)));
 }
 - (void)pan:(UIPanGestureRecognizer *)gesture {
-  if (gesture.state == UIGestureRecognizerStateBegan) self.panCenter = CGPointMake(gps_x(self.centerCoordinate.longitude), gps_y(self.centerCoordinate.latitude));
+  if (gesture.state == UIGestureRecognizerStateBegan) { ++self.animationGeneration; self.panCenter = CGPointMake(gps_x(self.centerCoordinate.longitude), gps_y(self.centerCoordinate.latitude)); }
   CGPoint delta = [gesture translationInView:self];
-  [self setCenterCoordinate:CLLocationCoordinate2DMake(gps_lat(fmax(0, fmin(1, self.panCenter.y - delta.y / self.worldSize))), gps_lon(self.panCenter.x - delta.x / self.worldSize)) animated:NO];
+  double x = self.panCenter.x - delta.x / self.worldSize;
+  _centerCoordinate = CLLocationCoordinate2DMake(gps_lat(fmax(0, fmin(1, self.panCenter.y - delta.y / self.worldSize))), gps_lon(x - floor(x)));
+  [self gestureChanged:gesture];
 }
 - (void)pinch:(UIPinchGestureRecognizer *)gesture {
-  if (gesture.state == UIGestureRecognizerStateBegan) self.pinchZoom = self.zoom;
-  [self setZoom:self.pinchZoom + log2(gesture.scale) animated:NO];
+  if (gesture.state == UIGestureRecognizerStateBegan) { ++self.animationGeneration; self.pinchZoom = self.zoom; }
+  _zoom = fmax(2, fmin(19, self.pinchZoom + log2(gesture.scale)));
+  [self gestureChanged:gesture];
 }
 - (void)longPress:(UILongPressGestureRecognizer *)gesture {
   if (gesture.state == UIGestureRecognizerStateBegan && self.longPressHandler)
@@ -167,41 +200,60 @@
 - (void)addOverlay:(id<MKOverlay>)overlay level:(MKOverlayLevel)level { if (overlay) [self.overlayList addObject:overlay]; [self setNeedsDisplay]; }
 - (void)removeOverlay:(id<MKOverlay>)overlay { [self.overlayList removeObject:overlay]; [self setNeedsDisplay]; }
 - (MKAnnotationView *)viewForAnnotation:(id<MKAnnotation>)annotation { return nil; }
+- (UIImage *)decodedImage:(NSData *)data {
+  UIImage *image = data ? [UIImage imageWithData:data] : nil;
+  CGImageRef source = image.CGImage;
+  if (!source) return nil;
+  size_t width = CGImageGetWidth(source), height = CGImageGetHeight(source);
+  CGColorSpaceRef color = CGColorSpaceCreateDeviceRGB();
+  CGContextRef context = CGBitmapContextCreate(NULL, width, height, 8, width * 4, color, (CGBitmapInfo)kCGImageAlphaPremultipliedLast);
+  CGColorSpaceRelease(color);
+  if (!context) return nil;
+  CGContextDrawImage(context, CGRectMake(0, 0, width, height), source);
+  CGImageRef decoded = CGBitmapContextCreateImage(context);
+  UIImage *result = [UIImage imageWithCGImage:decoded];
+  CGImageRelease(decoded); CGContextRelease(context);
+  return result;
+}
 - (void)loadTile:(NSString *)key url:(NSURL *)url {
-  if (self.requests[key]) return;
+  if (self.requests[key] || [self.diskLoads containsObject:key]) return;
   NSDate *retry = self.retryAfter[key];
   if (retry && retry.timeIntervalSinceNow > 0) return;
+  if (self.requests.count + self.diskLoads.count >= 6) return;
   [self.retryAfter removeObjectForKey:key];
   NSString *file = [@"/var/mobile/Library/Caches/com.xtieume.gpsnav/tiles" stringByAppendingPathComponent:[key stringByAppendingString:@".png"]];
-  UIImage *disk = [UIImage imageWithContentsOfFile:file];
-  if (disk) { [self.cache setObject:disk forKey:key]; [self setNeedsDisplay]; return; }
-  if (self.requests.count >= 6) return;
-  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.3" forHTTPHeaderField:@"User-Agent"];
-  __block NSURLSessionDataTask *task = nil;
-  task = [self.session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+  [self.diskLoads addObject:key];
+  dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    UIImage *disk = [self decodedImage:[NSData dataWithContentsOfFile:file]];
     dispatch_async(dispatch_get_main_queue(), ^{
-      if (self.requests[key] == task) [self.requests removeObjectForKey:key];
-      NSInteger status = [(NSHTTPURLResponse *)response statusCode];
-      UIImage *image = data ? [UIImage imageWithData:data] : nil;
-      if (error.code == NSURLErrorCancelled) { [self setNeedsDisplay]; return; }
-      if (error || status != 200 || !image) {
-        self.minuteFail++;
-        self.retryAfter[key] = [NSDate dateWithTimeIntervalSinceNow:30];
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self setNeedsDisplay]; });
-        GPSNavLog(@"Tile failure URL=%@ status=%ld error=%@", url, (long)status, error);
-        [self setNeedsDisplay];
-      } else {
-        self.minuteOK++;
-        if (self.successes++ < 20) GPSNavLog(@"Tile success URL=%@ bytes=%lu", url, (unsigned long)data.length);
-        [self.cache setObject:image forKey:key];
-        [data writeToFile:file atomically:YES];
-        [self setNeedsDisplay];
-      }
+      [self.diskLoads removeObject:key];
+      if (disk) { [self.cache setObject:disk forKey:key]; [self setNeedsDisplay]; return; }
+      NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
+      [request setValue:@"GPSNav/1.0.4" forHTTPHeaderField:@"User-Agent"];
+      __block NSURLSessionDataTask *task = nil;
+      task = [self.session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        NSInteger status = [(NSHTTPURLResponse *)response statusCode];
+        UIImage *image = !error && status == 200 ? [self decodedImage:data] : nil;
+        if (image) [data writeToFile:file atomically:YES];
+        dispatch_async(dispatch_get_main_queue(), ^{
+          if (self.requests[key] == task) [self.requests removeObjectForKey:key];
+          if (error.code == NSURLErrorCancelled) { [self setNeedsDisplay]; return; }
+          if (!image) {
+            self.minuteFail++;
+            self.retryAfter[key] = [NSDate dateWithTimeIntervalSinceNow:30];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self setNeedsDisplay]; });
+            GPSNavLog(@"Tile failure URL=%@ status=%ld error=%@", url, (long)status, error);
+          } else {
+            self.minuteOK++;
+            [self.cache setObject:image forKey:key];
+          }
+          [self setNeedsDisplay];
+        });
+      }];
+      self.requests[key] = task;
+      [task resume];
     });
-  }];
-  self.requests[key] = task;
-  [task resume];
+  });
 }
 - (void)drawRect:(CGRect)rect {
   CGContextRef cg = UIGraphicsGetCurrentContext();
@@ -222,7 +274,23 @@
       CGRect tile = CGRectMake((x - left) * tileSize, (y - top) * tileSize, tileSize + 0.5, tileSize + 0.5);
       UIImage *image = [self.cache objectForKey:key];
       if (image) [image drawInRect:tile];
-      else [self loadTile:key url:[NSURL URLWithString:[NSString stringWithFormat:@"https://tile.openstreetmap.org/%d/%d/%d.png", z, wrapped, y]]];
+      else {
+        for (int parentZ = z - 1; parentZ >= 0; parentZ--) {
+          int factor = 1 << (z - parentZ);
+          NSString *parentKey = [NSString stringWithFormat:@"%d-%d-%d", parentZ, wrapped / factor, y / factor];
+          UIImage *parent = [self.cache objectForKey:parentKey];
+          if (parent) {
+            CGContextSaveGState(cg);
+            CGContextClipToRect(cg, tile);
+            [parent drawInRect:CGRectMake(tile.origin.x - (wrapped % factor) * tileSize,
+                                          tile.origin.y - (y % factor) * tileSize,
+                                          tileSize * factor, tileSize * factor)];
+            CGContextRestoreGState(cg);
+            break;
+          }
+        }
+        [self loadTile:key url:[NSURL URLWithString:[NSString stringWithFormat:@"https://tile.openstreetmap.org/%d/%d/%d.png", z, wrapped, y]]];
+      }
     }
   }
   for (NSString *key in self.requests.allKeys) if (![visible containsObject:key]) { [self.requests[key] cancel]; [self.requests removeObjectForKey:key]; }
@@ -259,6 +327,11 @@
       CGContextFillEllipseInRect(cg, CGRectMake(p.x - 8, p.y - 8, 16, 16));
     } else {
       CGContextSetFillColorWithColor(cg, color.CGColor);
+      if ([title isEqual:@"A"]) {
+        CGContextFillEllipseInRect(cg, CGRectMake(p.x - 10, p.y - 10, 20, 20));
+        [title drawAtPoint:CGPointMake(p.x - 4, p.y - 8) withAttributes:@{NSFontAttributeName:[UIFont boldSystemFontOfSize:12], NSForegroundColorAttributeName:UIColor.whiteColor}];
+        continue;
+      }
       CGContextMoveToPoint(cg, p.x, p.y);
       CGContextAddLineToPoint(cg, p.x - 9, p.y - 16);
       CGContextAddLineToPoint(cg, p.x + 9, p.y - 16);
