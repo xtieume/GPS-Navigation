@@ -1,0 +1,4 @@
+#!/bin/sh
+if [ -d /var/jb ]; then app=/var/jb/Applications/GPSNav.app; else app=/Applications/GPSNav.app; fi
+if command -v uicache >/dev/null 2>&1; then uicache -u "$app" || true; fi
+exit 0
