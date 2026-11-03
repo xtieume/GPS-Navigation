@@ -3,6 +3,7 @@
 #import <objc/runtime.h>
 #import <notify.h>
 #import <string.h>
+#import "../Shared/Log.h"
 extern void GPSNavStartEngine(void);
 static int latToken, lonToken, flagsToken, motionToken;
 static BOOL blacklisted;
@@ -12,6 +13,14 @@ static CLLocation *fakeLocation(void) {
  notify_get_state(latToken,&lat); notify_get_state(lonToken,&lon); notify_get_state(motionToken,&motion);
  double a,b; float speed,course; uint32_t s=(uint32_t)motion,c=(uint32_t)(motion>>32); memcpy(&a,&lat,8); memcpy(&b,&lon,8); memcpy(&speed,&s,4); memcpy(&course,&c,4);
  if (!CLLocationCoordinate2DIsValid(CLLocationCoordinate2DMake(a,b))) return nil;
+ static NSTimeInterval lastLog;
+ @synchronized (CLLocation.class) {
+  NSTimeInterval now = NSDate.date.timeIntervalSince1970;
+  if (now - lastLog >= 10) {
+   lastLog = now;
+   GPSNavLog(@"Fake location bundle=%@ lat=%.8f lon=%.8f speed=%f course=%f", NSBundle.mainBundle.bundleIdentifier, a, b, speed, course);
+  }
+ }
  return [[CLLocation alloc] initWithCoordinate:CLLocationCoordinate2DMake(a,b) altitude:0 horizontalAccuracy:5 verticalAccuracy:5 course:course speed:speed timestamp:NSDate.date];
 }
 @interface GPSNavDelegate : NSProxy <CLLocationManagerDelegate>
@@ -48,6 +57,9 @@ static const void *proxyKey=&proxyKey, *activeKey=&activeKey;
  NSString *bundle=NSBundle.mainBundle.bundleIdentifier;
  if ([bundle isEqualToString:@"com.apple.springboard"]) { dispatch_async(dispatch_get_main_queue(), ^{ GPSNavStartEngine(); }); return; }
  if (!bundle.length || [bundle isEqualToString:@"com.xtieume.gpsnav"] || ![NSBundle.mainBundle.bundlePath hasSuffix:@".app"]) return;
+ GPSNavSetLogComponent(@"tweak");
+ GPSNavLog(@"Installing hooks bundle=%@", bundle);
  NSArray *list=[NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.xtieume.gpsnav.plist"][@"blacklist"]; blacklisted=[list containsObject:bundle];
+ GPSNavLog(@"Hook configuration bundle=%@ blacklisted=%d", bundle, blacklisted);
  notify_register_check("com.xtieume.gpsnav.lat",&latToken); notify_register_check("com.xtieume.gpsnav.lon",&lonToken); notify_register_check("com.xtieume.gpsnav.flags",&flagsToken); notify_register_check("com.xtieume.gpsnav.motion",&motionToken); %init;
 } }

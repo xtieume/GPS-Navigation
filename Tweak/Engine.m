@@ -3,6 +3,7 @@
 #import <math.h>
 #import <string.h>
 #import "../Shared/Geo.h"
+#import "../Shared/Log.h"
 static NSString *const configPath=@"/var/mobile/Library/Preferences/com.xtieume.gpsnav.plist";
 static NSString *const progressPath=@"/var/mobile/Library/Preferences/com.xtieume.gpsnav.progress.plist";
 @interface GPSNavEngine : NSObject
@@ -21,6 +22,7 @@ static NSString *const progressPath=@"/var/mobile/Library/Preferences/com.xtieum
  [NSTimer scheduledTimerWithTimeInterval:1 target:self selector:@selector(tick) userInfo:nil repeats:YES];
  } return self; }
 - (void)reload {
+ GPSNavLog(@"Reload preferences %@", configPath);
  NSDictionary *old=self.config; self.config=[NSMutableDictionary dictionaryWithContentsOfFile:configPath] ?: NSMutableDictionary.new;
  BOOL changed = !old || ![old[@"revision"] isEqual:self.config[@"revision"]];
  if (changed) {
@@ -63,4 +65,4 @@ static NSString *const progressPath=@"/var/mobile/Library/Preferences/com.xtieum
  if (self.config[@"revision"]) { NSDictionary *p=@{@"revision":self.config[@"revision"],@"lat":@(self.point.lat),@"lon":@(self.point.lon),@"index":@(self.index),@"direction":@(self.direction),@"fraction":@(self.fraction),@"lastRandom":@(self.lastRandom)}; [p writeToFile:progressPath atomically:YES]; }
 }
 @end
-void GPSNavStartEngine(void) { static GPSNavEngine *engine; if (!engine) engine=GPSNavEngine.new; }
+void GPSNavStartEngine(void) { GPSNavSetLogComponent(@"engine"); GPSNavLog(@"Engine starting bundle=%@", NSBundle.mainBundle.bundleIdentifier); static GPSNavEngine *engine; if (!engine) engine=GPSNavEngine.new; }
