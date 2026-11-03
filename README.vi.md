@@ -11,6 +11,8 @@ GPSNav mô phỏng vị trí cho iOS 16.0 trở lên đã jailbreak, hỗ trợ 
 
 ## Cài đặt
 
+Thêm nguồn Sileo `https://xtieume.github.io/GPS-Navigation/` rồi cài **GPSNav**, hoặc cài deb thủ công:
+
 Chọn gói rootless `iphoneos-arm64` hoặc rootful `iphoneos-arm` phù hợp với jailbreak. Chuyển tệp deb vào thiết bị và cài bằng Sileo hoặc Filza. Respring để nạp tweak vào SpringBoard rồi khởi động lại các ứng dụng cần dùng. Bật tính năng nạp tweak của jailbreak nếu cần. Gỡ bằng trình quản lý gói.
 
 ## Giới hạn
