@@ -2,6 +2,7 @@
 #import "ListSheet.h"
 #import "LogSheet.h"
 #import "TileMapView.h"
+#import "Mercator.h"
 #import <Metal/Metal.h>
 #import <Security/Security.h>
 #import <dlfcn.h>
@@ -14,7 +15,7 @@
 - (void)loadTileAtPath:(MKTileOverlayPath)path result:(void (^)(NSData *, NSError *))result {
   NSURL *url = [self URLForTilePath:path];
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.3" forHTTPHeaderField:@"User-Agent"];
+  [request setValue:@"GPSNav/1.0.4" forHTTPHeaderField:@"User-Agent"];
   [[[NSURLSession sharedSession]
       dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -59,6 +60,9 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 @property GPSNavTileOverlay *tiles;
 @property UILabel *attribution;
 @property BOOL didDumpLayout;
+@property BOOL panelCollapsed;
+@property BOOL pendingLocationCenter;
+@property UIVisualEffectView *panel;
 @end
 @implementation MapController
 - (void)viewDidLoad {
@@ -95,6 +99,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   notify_register_check("com.xtieume.gpsnav.lon", &_lonToken);
   notify_register_check("com.xtieume.gpsnav.flags", &_flagsToken);
   notify_register_check("com.xtieume.gpsnav.motion", &_motionToken);
+  self.panelCollapsed = [NSUserDefaults.standardUserDefaults boolForKey:@"panelCollapsed"];
   self.routeTarget = -1;
   self.locationManager = CLLocationManager.new;
   self.locationManager.delegate = self;
@@ -124,8 +129,6 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   button.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
   button.titleLabel.adjustsFontForContentSizeCategory = YES;
   button.accessibilityLabel = title.length ? title : symbol;
-  [button.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
-  [button.widthAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
   [button addTarget:self action:action forControlEvents:UIControlEventTouchUpInside];
   return button;
 }
@@ -173,9 +176,19 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   UIButton *saved = [self button:@"" symbol:@"star.fill" action:@selector(bookmarksMenu)];
   saved.accessibilityLabel = @"Bookmarks";
   [floatStack addArrangedSubview:saved];
+  UIButton *routes = [self button:@"" symbol:@"map.fill" action:@selector(routesMenu)];
+  routes.accessibilityLabel = @"Routes";
+  [floatStack addArrangedSubview:routes];
+  UIButton *history = [self button:@"" symbol:@"clock.arrow.circlepath" action:@selector(historyMenu)];
+  history.accessibilityLabel = @"History";
+  [floatStack addArrangedSubview:history];
   UIButton *logs = [self button:@"" symbol:@"doc.text.magnifyingglass" action:@selector(showLogs)];
   logs.accessibilityLabel = @"Logs";
   [floatStack addArrangedSubview:logs];
+  for (UIView *button in floatStack.arrangedSubviews) {
+    [button.widthAnchor constraintEqualToConstant:44].active = YES;
+    [button.heightAnchor constraintEqualToConstant:44].active = YES;
+  }
   UIVisualEffectView *speedPill = [self blurView];
   [self.view addSubview:speedPill];
   self.speedLabel = UILabel.new;
@@ -189,7 +202,8 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [speedPill.contentView addSubview:speedIcon];
   speedPill.hidden = YES;
   UIVisualEffectView *panel = [self blurView];
-  panel.layer.cornerRadius = 20;
+  self.panel = panel;
+  panel.layer.cornerRadius = 16;
   panel.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
   panel.clipsToBounds = NO;
   panel.layer.shadowColor = UIColor.blackColor.CGColor;
@@ -210,6 +224,12 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   UIStackView *handle = [[UIStackView alloc] initWithArrangedSubviews:@[ grabber ]];
   handle.alignment = UIStackViewAlignmentCenter;
   handle.axis = UILayoutConstraintAxisVertical;
+  handle.userInteractionEnabled = YES;
+  handle.accessibilityLabel = @"Toggle panel";
+  handle.isAccessibilityElement = YES;
+  handle.accessibilityTraits = UIAccessibilityTraitButton;
+  [handle addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(togglePanel)]];
+  [handle addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragPanel:)]];
   [controls addArrangedSubview:handle];
   self.mode = [[UISegmentedControl alloc] initWithItems:@[ @"Fixed", @"Route", @"Random" ]];
   [self updateModeImages];
@@ -219,7 +239,9 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [self.mode addTarget:self
                 action:@selector(modeChanged)
       forControlEvents:UIControlEventValueChanged];
-  [self.mode.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+  NSLayoutConstraint *modeHeight = [self.mode.heightAnchor constraintEqualToConstant:34];
+  modeHeight.priority = UILayoutPriorityDefaultHigh;
+  modeHeight.active = YES;
   [controls addArrangedSubview:self.mode];
   self.enabled = UISwitch.new;
   self.enabled.on = [self.config[@"enabled"] boolValue];
@@ -227,8 +249,8 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   CGFloat statusSize = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote].pointSize;
   self.status.font = [UIFont monospacedDigitSystemFontOfSize:statusSize weight:UIFontWeightRegular];
   self.status.adjustsFontForContentSizeCategory = YES;
-  self.status.numberOfLines = 2;
-  [self.status.heightAnchor constraintGreaterThanOrEqualToConstant:44].active = YES;
+  self.status.numberOfLines = 1;
+  [self.status.heightAnchor constraintEqualToConstant:16].active = YES;
   self.status.userInteractionEnabled = YES;
   self.status.accessibilityLabel = @"Copy coordinates";
   [self.status addGestureRecognizer:[[UITapGestureRecognizer alloc]
@@ -238,7 +260,12 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.modeControls = UIStackView.new;
   self.modeControls.axis = UILayoutConstraintAxisVertical;
   self.modeControls.spacing = 4;
+  NSLayoutConstraint *controlsHeight = [self.modeControls.heightAnchor constraintEqualToConstant:36];
+  controlsHeight.priority = UILayoutPriorityDefaultHigh;
+  controlsHeight.active = YES;
   [controls addArrangedSubview:self.modeControls];
+  self.mode.hidden = self.panelCollapsed;
+  self.modeControls.hidden = self.panelCollapsed;
   self.primaryButton = [self button:@"Start spoofing"
                              symbol:@"play.fill"
                              action:@selector(toggleEnabled)];
@@ -246,26 +273,8 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.primaryButton.clipsToBounds = YES;
   [self.primaryButton setTitleColor:UIColor.whiteColor forState:UIControlStateNormal];
   self.primaryButton.tintColor = UIColor.whiteColor;
-  [self.primaryButton.heightAnchor constraintEqualToConstant:50].active = YES;
+  [self.primaryButton.heightAnchor constraintEqualToConstant:44].active = YES;
   [controls addArrangedSubview:self.primaryButton];
-  UIStackView *secondary = [self row];
-  secondary.distribution = UIStackViewDistributionFillEqually;
-  NSArray *titles = @[ @"Saved", @"Routes", @"History" ];
-  NSArray *icons = @[ @"star.fill", @"map.fill", @"clock.arrow.circlepath" ];
-  NSArray *actions = @[ @"bookmarksMenu", @"routesMenu", @"historyMenu" ];
-  for (NSUInteger i = 0; i < titles.count; i++) {
-    UIButton *button = [self button:titles[i]
-                             symbol:icons[i]
-                             action:NSSelectorFromString(actions[i])];
-    UIButtonConfiguration *configuration = [UIButtonConfiguration plainButtonConfiguration];
-    configuration.title = titles[i];
-    configuration.image = [UIImage systemImageNamed:icons[i]];
-    configuration.imagePlacement = NSDirectionalRectEdgeTop;
-    configuration.imagePadding = 2;
-    button.configuration = configuration;
-    [secondary addArrangedSubview:button];
-  }
-  [controls addArrangedSubview:secondary];
   UILabel *attribution = UILabel.new;
   self.attribution = attribution;
   attribution.hidden = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"];
@@ -329,7 +338,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     [self updateModeImages];
 }
 - (UIImage *)segmentImage:(NSString *)symbol title:(NSString *)title {
-  UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleSubheadline];
+  UIFont *font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
   UIImage *icon = [UIImage systemImageNamed:symbol];
   NSDictionary *attributes = @{ NSFontAttributeName: font, NSForegroundColorAttributeName: UIColor.labelColor };
   CGSize textSize = [title sizeWithAttributes:attributes];
@@ -362,9 +371,10 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     hint.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
     hint.adjustsFontForContentSizeCategory = YES;
     [row addArrangedSubview:hint];
-    [row addArrangedSubview:[self button:@"Save"
-                                  symbol:@"bookmark.fill"
-                                  action:@selector(saveBookmark)]];
+    UIButton *bookmark = [self button:@"" symbol:@"bookmark.fill" action:@selector(saveBookmark)];
+    bookmark.accessibilityLabel = @"Save bookmark";
+    [bookmark.widthAnchor constraintEqualToConstant:36].active = YES;
+    [row addArrangedSubview:bookmark];
     [self.modeControls addArrangedSubview:row];
   } else if (self.mode.selectedSegmentIndex == 1) {
     UIStackView *row = [self row];
@@ -389,9 +399,8 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     UIButton *swap = [self button:@"" symbol:@"arrow.up.arrow.down" action:@selector(swapRoute)];
     swap.accessibilityLabel = @"Swap route points";
     [row addArrangedSubview:swap];
-    [self.modeControls addArrangedSubview:row];
-    UIStackView *options = [self row];
-    UIButton *speed = [self button:[NSString stringWithFormat:@"%@ km/h", self.config[@"speed"]]
+    UIStackView *options = row;
+    UIButton *speed = [self button:[NSString stringWithFormat:@"%@", self.config[@"speed"]]
                             symbol:@"speedometer"
                             action:@selector(routeOptions)];
     NSMutableArray *speedActions = NSMutableArray.new;
@@ -438,9 +447,20 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     loop.tintColor =
         [self.config[@"loop"] boolValue] ? UIColor.systemBlueColor : UIColor.secondaryLabelColor;
     [options addArrangedSubview:loop];
-    [options addArrangedSubview:[self button:@"Save route"
+    [options addArrangedSubview:[self button:@""
                                       symbol:@"bookmark.fill"
                                       action:@selector(saveRoute)]];
+    for (UIButton *chip in @[pointA, pointB]) {
+      chip.titleLabel.font = [UIFont preferredFontForTextStyle:UIFontTextStyleCaption1];
+      chip.titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+      [chip setContentCompressionResistancePriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    }
+    [pointA.widthAnchor constraintEqualToAnchor:pointB.widthAnchor].active = YES;
+    for (UIButton *icon in @[swap, loop]) [icon.widthAnchor constraintEqualToConstant:30].active = YES;
+    UIButton *saveRouteButton = options.arrangedSubviews.lastObject;
+    saveRouteButton.accessibilityLabel = @"Save route";
+    [saveRouteButton.widthAnchor constraintEqualToConstant:30].active = YES;
+    speed.accessibilityLabel = @"Route speed";
     [self.modeControls addArrangedSubview:options];
   } else {
     UIStackView *row = [self row];
@@ -486,6 +506,41 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
                       forState:UIControlStateNormal];
   self.primaryButton.backgroundColor = on ? UIColor.systemRedColor : UIColor.systemBlueColor;
 }
+- (void)setPanelCollapsed:(BOOL)collapsed animated:(BOOL)animated {
+  _panelCollapsed = collapsed;
+  [NSUserDefaults.standardUserDefaults setBool:collapsed forKey:@"panelCollapsed"];
+  void (^changes)(void) = ^{
+    self.mode.hidden = collapsed;
+    self.modeControls.hidden = collapsed;
+    [self.view layoutIfNeeded];
+  };
+  if (animated) [UIView animateWithDuration:0.25 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0 options:0 animations:changes completion:nil];
+  else changes();
+}
+- (void)togglePanel { [self setPanelCollapsed:!self.panelCollapsed animated:YES]; }
+- (void)dragPanel:(UIPanGestureRecognizer *)gesture {
+  if (gesture.state == UIGestureRecognizerStateEnded) {
+    CGFloat delta = [gesture translationInView:self.view].y;
+    if (fabs(delta) > 8) [self setPanelCollapsed:delta > 0 animated:YES];
+  }
+}
+- (CGFloat)panelInset { return self.view.bounds.size.height - CGRectGetMinY(self.panel.frame); }
+- (void)centerOnCoordinate:(CLLocationCoordinate2D)coordinate {
+  if ([self.map isKindOfClass:TileMapView.class]) {
+    TileMapView *map = (TileMapView *)self.map;
+    double zoom = MAX(map.zoom, 16);
+    double y = gps_y(coordinate.latitude) + [self panelInset] / (2.0 * 256.0 * pow(2, zoom));
+    CLLocationCoordinate2D center = CLLocationCoordinate2DMake(gps_lat(y), coordinate.longitude);
+    [map setCenterCoordinate:center zoom:zoom animated:YES];
+  } else {
+    double width = MAX(self.map.bounds.size.width, 1);
+    double span = MIN(self.map.region.span.longitudeDelta, width * 360.0 / (256.0 * pow(2, 16)));
+    MKMapPoint point = MKMapPointForCoordinate(coordinate);
+    point.y += [self panelInset] / 2.0 * span / width / 360.0 * MKMapSizeWorld.width;
+    MKCoordinateRegion region = MKCoordinateRegionMake(MKCoordinateForMapPoint(point), MKCoordinateSpanMake(span * self.map.bounds.size.height / width, span));
+    [self.map setRegion:region animated:YES];
+  }
+}
 - (void)toggleEnabled {
   self.enabled.on = !self.enabled.on;
   [self enabledChanged];
@@ -500,6 +555,12 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   UIPasteboard.generalPasteboard.string = [NSString stringWithFormat:@"%.5f, %.5f", latitude, longitude];
 }
 - (void)myLocation {
+  self.pendingLocationCenter = YES;
+  if (self.locationManager.location) {
+    [self centerOnCoordinate:self.locationManager.location.coordinate];
+    self.pendingLocationCenter = NO;
+    return;
+  }
   CLAuthorizationStatus status = self.locationManager.authorizationStatus;
   if (status == kCLAuthorizationStatusNotDetermined) {
     [self.locationManager requestWhenInUseAuthorization];
@@ -528,11 +589,10 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     tileMap.hasUserCoordinate = YES;
     [tileMap setNeedsDisplay];
   }
-  [self.map setCenterCoordinate:location.coordinate animated:YES];
-  self.config[@"latitude"] = @(location.coordinate.latitude);
-  self.config[@"longitude"] = @(location.coordinate.longitude);
-  [self updateSelection:location.coordinate];
-  [self save:YES];
+  if (self.pendingLocationCenter) {
+    self.pendingLocationCenter = NO;
+    [self centerOnCoordinate:location.coordinate];
+  }
   [self.locationButton setImage:[UIImage systemImageNamed:@"location.fill"]
                        forState:UIControlStateNormal];
 }
@@ -704,13 +764,23 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     [self.map addAnnotation:self.selection];
   }
   self.selection.coordinate = c;
+  [self syncSelectionVisibility];
   [self.map setNeedsDisplay];
+}
+- (void)syncSelectionVisibility {
+  BOOL hide = self.mode.selectedSegmentIndex == 1 && self.start &&
+    fabs(self.selection.coordinate.latitude - self.start.coordinate.latitude) < 1e-8 &&
+    fabs(self.selection.coordinate.longitude - self.start.coordinate.longitude) < 1e-8;
+  BOOL shown = [self.map.annotations containsObject:self.selection];
+  if (hide && shown) [self.map removeAnnotation:self.selection];
+  else if (!hide && !shown && self.selection) [self.map addAnnotation:self.selection];
 }
 - (void)modeChanged {
   self.config[@"mode"] =
       @[ @"fixed", @"route", @"random" ][(NSUInteger)self.mode.selectedSegmentIndex];
   [self save:YES];
   [self refreshControls];
+  [self syncSelectionVisibility];
 }
 - (void)enabledChanged {
   if (self.enabled.on && self.mode.selectedSegmentIndex == 1 && [self.config[@"route"] count] < 2) {
@@ -759,6 +829,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
         [self fetchRoute];
       else
         [self save:YES];
+      [self syncSelectionVisibility];
       [self refreshControls];
       return;
     }
@@ -784,6 +855,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     [self updateSelection:c];
     [self save:YES];
   }
+  [self syncSelectionVisibility];
   [self refreshControls];
 }
 - (void)clearRoute {
@@ -817,7 +889,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 }
 - (void)fetchJSON:(NSURL *)url completion:(void (^)(id, NSError *))completion {
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.3" forHTTPHeaderField:@"User-Agent"];
+  [request setValue:@"GPSNav/1.0.4" forHTTPHeaderField:@"User-Agent"];
   [[[NSURLSession sharedSession]
       dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -997,7 +1069,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
              symbol:@"magnifyingglass"
              select:^(NSUInteger index) {
                CLLocationCoordinate2D coordinate = items[index].placemark.coordinate;
-               [self.map setCenterCoordinate:coordinate animated:YES];
+               [self centerOnCoordinate:coordinate];
                [self choose:coordinate];
              }
              delete:nil];
@@ -1139,7 +1211,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
         NSDictionary *entry = self.bookmarks[index];
         CLLocationCoordinate2D coordinate =
             CLLocationCoordinate2DMake([entry[@"lat"] doubleValue], [entry[@"lon"] doubleValue]);
-        [self.map setCenterCoordinate:coordinate animated:YES];
+        [self centerOnCoordinate:coordinate];
         [self choose:coordinate];
       }
       delete:^(NSUInteger index) {
@@ -1165,7 +1237,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
         self.config[@"mode"] = @"route";
         [self restoreRoute];
         [self.map setVisibleMapRect:self.line.boundingMapRect
-                        edgePadding:UIEdgeInsetsMake(80, 40, 300, 40)
+                        edgePadding:UIEdgeInsetsMake(80, 40, [self panelInset] + 20, 40)
                            animated:YES];
         [self save:YES];
         [self refreshControls];
@@ -1293,7 +1365,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 - (void)settings {
   [self
       presentList:@"Settings"
-            items:@[ @"Blacklist apps", [NSString stringWithFormat:@"Map engine: %@", self.config[@"mapEngine"]], @"About GPSNav 1.0.3" ]
+            items:@[ @"Blacklist apps", [NSString stringWithFormat:@"Map engine: %@", self.config[@"mapEngine"]], @"About GPSNav 1.0.4" ]
            symbol:@"gearshape.fill"
            select:^(NSUInteger index) {
              if (index == 0) {
@@ -1303,7 +1375,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
                [self applyMapTiles];
                [self save:NO];
              } else {
-               [self sheet:@"GPSNav 1.0.3"
+               [self sheet:@"GPSNav 1.0.4"
                    actions:@[ [UIAlertAction
                                actionWithTitle:@"GitHub"
                                          style:UIAlertActionStyleDefault

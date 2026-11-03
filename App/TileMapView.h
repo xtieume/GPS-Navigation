@@ -15,6 +15,7 @@
 @property (nonatomic, readonly) MKMapCamera *camera;
 - (void)setCenterCoordinate:(CLLocationCoordinate2D)coordinate animated:(BOOL)animated;
 - (void)setZoom:(double)zoom animated:(BOOL)animated;
+- (void)setCenterCoordinate:(CLLocationCoordinate2D)coordinate zoom:(double)zoom animated:(BOOL)animated;
 - (void)setRegion:(MKCoordinateRegion)region animated:(BOOL)animated;
 - (void)setVisibleMapRect:(MKMapRect)rect edgePadding:(UIEdgeInsets)padding animated:(BOOL)animated;
 - (CLLocationCoordinate2D)convertPoint:(CGPoint)point toCoordinateFromView:(UIView *)view;
