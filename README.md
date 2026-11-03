@@ -2,12 +2,20 @@
 
 GPSNav is a location simulator for jailbroken iOS 16.0 and later on arm64/arm64e. It supports rootless and rootful jailbreaks. Author: Tieu Me.
 
+## Preview
+
+<p align="center"><img src="docs/screenshot.jpg" alt="GPSNav screenshot" width="320"></p>
+
 ## Features and use
 
-- Tap or long-press the map in **Fixed** mode to choose a coordinate, then turn on **Spoof location**. In **Random** mode the selected point is the center; set the radius in meters and interval in seconds under **Random**.
-- In **Route** mode tap A and then B. MapKit calculates a road route; use **Speed / route** to select automobile or walking directions, speed in km/h, and reverse loop. Turn on spoofing after the route loads. Tap again to start a new route.
-- Search for a place and select a result; **Search history** keeps the last 20 searches. **Bookmarks** and **Routes** save, apply, and delete locations and routes. Settings lets you edit a comma-separated bundle ID blacklist and view About.
-- SpringBoard runs the simulation in the background and restores its progress after a respring. The map shows the published engine position.
+- **Map**: built-in OpenStreetMap map with pan, pinch and double-tap zoom. The location button centers on your real position with an accuracy circle.
+- **Fixed**: long-press the map (or pick a search result / bookmark) to choose a point, then tap **Start spoofing**.
+- **Route**: set A and B, then the app routes along real roads (MapKit directions with OSRM fallback). Choose the speed in km/h, toggle reverse loop (A→B→A…), and save the route.
+- **Random**: jumps to a random point within a radius around the selected point at a set interval.
+- **Search** with history (Nominatim fallback), **Bookmarks**, **Saved routes** and **History** from the right-hand buttons.
+- **Logs**: built-in log viewer (App / Engine / Tweak) with diagnostics, copy and share.
+- **Settings**: bundle ID blacklist (apps that keep the real location) and About.
+- SpringBoard runs the simulation in the background and restores its progress after a respring.
 
 ## Install
 

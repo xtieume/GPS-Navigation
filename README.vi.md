@@ -2,12 +2,20 @@
 
 GPSNav mô phỏng vị trí cho iOS 16.0 trở lên đã jailbreak, hỗ trợ arm64/arm64e, rootless và rootful. Tác giả: Tieu Me.
 
+## Xem trước
+
+<p align="center"><img src="docs/screenshot.jpg" alt="Ảnh chụp GPSNav" width="320"></p>
+
 ## Tính năng và cách dùng
 
-- Ở chế độ **Fixed**, chạm hoặc nhấn giữ bản đồ để chọn tọa độ, sau đó bật **Spoof location**. Với **Random**, điểm đã chọn là tâm; đặt bán kính (mét) và khoảng thời gian (giây) trong **Random**.
-- Ở chế độ **Route**, chạm điểm A rồi B. MapKit tìm đường; trong **Speed / route**, chọn đi bộ hoặc ô tô, tốc độ km/h và lặp đảo chiều. Bật giả lập sau khi tải xong tuyến. Chạm tiếp để chọn tuyến mới.
-- Tìm địa điểm và chọn kết quả; **Search history** lưu 20 lần tìm gần nhất. **Bookmarks** và **Routes** cho phép lưu, áp dụng và xóa. Trong Settings có danh sách bundle ID không giả lập và thông tin ứng dụng.
-- SpringBoard tiếp tục mô phỏng khi ứng dụng ở nền và khôi phục tiến độ sau respring. Bản đồ hiển thị vị trí engine công bố.
+- **Bản đồ**: bản đồ OpenStreetMap tích hợp, kéo, chụm và chạm đúp để zoom. Nút định vị đưa về vị trí thật kèm vòng tròn độ chính xác.
+- **Fixed**: nhấn giữ bản đồ (hoặc chọn kết quả tìm kiếm / bookmark) để chọn điểm, rồi bấm **Start spoofing**.
+- **Route**: đặt A và B, ứng dụng tìm đường theo đường thật (MapKit, dự phòng OSRM). Chọn tốc độ km/h, bật lặp đảo chiều (A→B→A…) và lưu tuyến.
+- **Random**: nhảy tới điểm ngẫu nhiên trong bán kính quanh điểm đã chọn theo chu kỳ.
+- **Tìm kiếm** có lịch sử (dự phòng Nominatim), **Bookmarks**, **Tuyến đã lưu** và **Lịch sử** ở cột nút bên phải.
+- **Logs**: xem log tích hợp (App / Engine / Tweak), chạy chẩn đoán, sao chép và chia sẻ.
+- **Settings**: danh sách bundle ID không giả lập (giữ vị trí thật) và thông tin ứng dụng.
+- SpringBoard tiếp tục mô phỏng khi ứng dụng ở nền và khôi phục tiến độ sau respring.
 
 ## Cài đặt
 
