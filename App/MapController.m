@@ -3,40 +3,14 @@
 #import "LogSheet.h"
 #import "TileMapView.h"
 #import "Mercator.h"
-#import <Metal/Metal.h>
 #import <Security/Security.h>
 #import <dlfcn.h>
 #import "../Shared/Log.h"
 #import <MapKit/MapKit.h>
 #import <notify.h>
-@interface GPSNavTileOverlay : MKTileOverlay
-@end
-@implementation GPSNavTileOverlay
-- (void)loadTileAtPath:(MKTileOverlayPath)path result:(void (^)(NSData *, NSError *))result {
-  NSURL *url = [self URLForTilePath:path];
-  NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.4" forHTTPHeaderField:@"User-Agent"];
-  [[[NSURLSession sharedSession]
-      dataTaskWithRequest:request
-        completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
-          NSInteger status = [(NSHTTPURLResponse *)response statusCode];
-          static NSUInteger successes;
-          @synchronized (GPSNavTileOverlay.class) {
-            if (error || status != 200 || successes < 20) GPSNavLog(@"Tile URL=%@ status=%ld bytes=%lu error=%@", url, (long)status, (unsigned long)data.length, error);
-            if (!error && status == 200) successes++;
-          }
-          if (!error && [(NSHTTPURLResponse *)response statusCode] != 200)
-            error = [NSError
-                errorWithDomain:@"GPSNav"
-                           code:[(NSHTTPURLResponse *)response statusCode]
-                       userInfo:@{NSLocalizedDescriptionKey : @"Could not load map tile."}];
-          result(data, error);
-        }] resume];
-}
-@end
 static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsnav.plist";
-@interface MapController () <MKMapViewDelegate, UISearchBarDelegate, CLLocationManagerDelegate, UITableViewDataSource, UITableViewDelegate>
-@property MKMapView *map;
+@interface MapController () <UISearchBarDelegate, CLLocationManagerDelegate, UITableViewDataSource, UITableViewDelegate>
+@property TileMapView *map;
 @property UISegmentedControl *mode;
 @property UISwitch *enabled;
 @property UILabel *status;
@@ -57,11 +31,12 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 @property UIStackView *modeControls;
 @property UISearchBar *searchBar;
 @property NSInteger routeTarget;
-@property GPSNavTileOverlay *tiles;
 @property UILabel *attribution;
 @property BOOL didDumpLayout;
 @property BOOL panelCollapsed;
 @property BOOL pendingLocationCenter;
+@property NSUInteger locationRequestGeneration;
+@property UILabel *locationToast;
 @property UIVisualEffectView *panel;
 @end
 @implementation MapController
@@ -71,11 +46,6 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.view.backgroundColor = UIColor.systemBackgroundColor;
   self.config = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: NSMutableDictionary.new;
   GPSNavLog(@"Preferences read %@: %@", path, self.config);
-  if (!self.config[@"mapEngine"]) {
-    self.config[@"mapEngine"] = [self.config[@"mapTiles"] isEqual:@"Apple Maps"] ? @"Apple MapKit" : @"Built-in (OpenStreetMap)";
-    [self.config removeObjectForKey:@"mapTiles"];
-    [self.config writeToFile:path atomically:YES];
-  }
   NSDictionary *defaults = @{
     @"latitude" : @10.7769,
     @"longitude" : @106.7009,
@@ -86,7 +56,6 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     @"loop" : @NO,
     @"enabled" : @NO,
     @"revision" : NSUUID.UUID.UUIDString,
-    @"mapEngine" : @"Built-in (OpenStreetMap)",
     @"transport" : @"automobile"
   };
   for (NSString *key in defaults)
@@ -103,6 +72,10 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.routeTarget = -1;
   self.locationManager = CLLocationManager.new;
   self.locationManager.delegate = self;
+  self.locationManager.desiredAccuracy = kCLLocationAccuracyBest;
+  self.locationManager.distanceFilter = 5;
+  [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(appDidBecomeActive:) name:UIApplicationDidBecomeActiveNotification object:nil];
+  [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(appWillResignActive:) name:UIApplicationWillResignActiveNotification object:nil];
   [self applyMapTiles];
   CLLocationCoordinate2D coord = CLLocationCoordinate2DMake(
       [self.config[@"latitude"] doubleValue], [self.config[@"longitude"] doubleValue]);
@@ -116,6 +89,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [self updateSelection:coord];
   [self poll];
   [self refreshControls];
+  [self startLocationUpdatesIfAllowed];
   [NSTimer scheduledTimerWithTimeInterval:1
                                    target:self
                                  selector:@selector(poll)
@@ -277,7 +251,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [controls addArrangedSubview:self.primaryButton];
   UILabel *attribution = UILabel.new;
   self.attribution = attribution;
-  attribution.hidden = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"];
+  attribution.hidden = NO;
   attribution.text = @"© OpenStreetMap contributors";
   attribution.font = [UIFont systemFontOfSize:10];
   attribution.textColor = UIColor.labelColor;
@@ -526,20 +500,10 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 }
 - (CGFloat)panelInset { return self.view.bounds.size.height - CGRectGetMinY(self.panel.frame); }
 - (void)centerOnCoordinate:(CLLocationCoordinate2D)coordinate {
-  if ([self.map isKindOfClass:TileMapView.class]) {
-    TileMapView *map = (TileMapView *)self.map;
-    double zoom = MAX(map.zoom, 16);
-    double y = gps_y(coordinate.latitude) + [self panelInset] / (2.0 * 256.0 * pow(2, zoom));
-    CLLocationCoordinate2D center = CLLocationCoordinate2DMake(gps_lat(y), coordinate.longitude);
-    [map setCenterCoordinate:center zoom:zoom animated:YES];
-  } else {
-    double width = MAX(self.map.bounds.size.width, 1);
-    double span = MIN(self.map.region.span.longitudeDelta, width * 360.0 / (256.0 * pow(2, 16)));
-    MKMapPoint point = MKMapPointForCoordinate(coordinate);
-    point.y += [self panelInset] / 2.0 * span / width / 360.0 * MKMapSizeWorld.width;
-    MKCoordinateRegion region = MKCoordinateRegionMake(MKCoordinateForMapPoint(point), MKCoordinateSpanMake(span * self.map.bounds.size.height / width, span));
-    [self.map setRegion:region animated:YES];
-  }
+  GPSNavLog(@"centerOnCoordinate latitude=%.8f longitude=%.8f", coordinate.latitude, coordinate.longitude);
+  double zoom = MAX(self.map.zoom, 16);
+  double y = gps_y(coordinate.latitude) + [self panelInset] / (2.0 * 256.0 * pow(2, zoom));
+  [self.map setCenterCoordinate:CLLocationCoordinate2DMake(gps_lat(y), coordinate.longitude) zoom:zoom animated:YES];
 }
 - (void)toggleEnabled {
   self.enabled.on = !self.enabled.on;
@@ -554,51 +518,106 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   double longitude = active ? self.current.coordinate.longitude : [self.config[@"longitude"] doubleValue];
   UIPasteboard.generalPasteboard.string = [NSString stringWithFormat:@"%.5f, %.5f", latitude, longitude];
 }
+- (BOOL)isFreshLocation:(CLLocation *)location {
+  if (!location || location.horizontalAccuracy <= 0 || !CLLocationCoordinate2DIsValid(location.coordinate)) return NO;
+  NSTimeInterval age = -location.timestamp.timeIntervalSinceNow;
+  return age >= 0 && age <= 10;
+}
+- (void)startLocationUpdatesIfAllowed {
+  CLAuthorizationStatus status = self.locationManager.authorizationStatus;
+  if (UIApplication.sharedApplication.applicationState == UIApplicationStateActive &&
+      (status == kCLAuthorizationStatusAuthorizedAlways || status == kCLAuthorizationStatusAuthorizedWhenInUse))
+    [self.locationManager startUpdatingLocation];
+}
+- (void)appDidBecomeActive:(NSNotification *)notification { [self startLocationUpdatesIfAllowed]; }
+- (void)appWillResignActive:(NSNotification *)notification { [self.locationManager stopUpdatingLocation]; }
+- (void)finishWaitingForLocation {
+  self.pendingLocationCenter = NO;
+  self.locationRequestGeneration++;
+  [self.locationToast removeFromSuperview];
+  self.locationToast = nil;
+}
+- (void)showLocationToast {
+  if (self.locationToast) return;
+  UILabel *label = UILabel.new;
+  label.text = @"Locating…";
+  label.font = [UIFont preferredFontForTextStyle:UIFontTextStyleFootnote];
+  label.textColor = UIColor.whiteColor;
+  label.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.75];
+  label.textAlignment = NSTextAlignmentCenter;
+  label.layer.cornerRadius = 10; label.clipsToBounds = YES;
+  label.translatesAutoresizingMaskIntoConstraints = NO;
+  [self.view addSubview:label];
+  [NSLayoutConstraint activateConstraints:@[
+    [label.centerXAnchor constraintEqualToAnchor:self.view.centerXAnchor],
+    [label.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:80],
+    [label.widthAnchor constraintEqualToConstant:110], [label.heightAnchor constraintEqualToConstant:36]
+  ]];
+  self.locationToast = label;
+}
+- (void)showLocation:(CLLocation *)location {
+  self.map.userCoordinate = location.coordinate;
+  self.map.horizontalAccuracy = location.horizontalAccuracy;
+  self.map.userCourse = location.course;
+  self.map.hasUserCoordinate = YES;
+}
 - (void)myLocation {
-  self.pendingLocationCenter = YES;
-  if (self.locationManager.location) {
-    [self centerOnCoordinate:self.locationManager.location.coordinate];
-    self.pendingLocationCenter = NO;
+  CLAuthorizationStatus status = self.locationManager.authorizationStatus;
+  if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
+    GPSNavLog(@"myLocation denied or restricted");
+    [self finishWaitingForLocation];
+    [self message:@"Allow location access in Settings to show your current location."];
     return;
   }
-  CLAuthorizationStatus status = self.locationManager.authorizationStatus;
-  if (status == kCLAuthorizationStatusNotDetermined) {
-    [self.locationManager requestWhenInUseAuthorization];
-  } else if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
-    [self message:@"Allow location access in Settings to show your current location."];
-  } else {
-    [self.locationManager requestLocation];
+  CLLocation *location = self.locationManager.location;
+  BOOL fresh = [self isFreshLocation:location];
+  GPSNavLog(@"myLocation cached=%d fresh=%d waiting=%d", location != nil, fresh, !fresh);
+  if (fresh && status != kCLAuthorizationStatusNotDetermined) {
+    [self finishWaitingForLocation];
+    [self showLocation:location];
+    [self centerOnCoordinate:location.coordinate];
+    return;
   }
+  self.pendingLocationCenter = YES;
+  NSUInteger generation = ++self.locationRequestGeneration;
+  [self showLocationToast];
+  if (status == kCLAuthorizationStatusNotDetermined) [self.locationManager requestWhenInUseAuthorization];
+  else [self startLocationUpdatesIfAllowed];
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+    if (self.pendingLocationCenter && self.locationRequestGeneration == generation) {
+      GPSNavLog(@"myLocation timed out waiting for a fresh fix");
+      [self finishWaitingForLocation];
+      [self message:@"Could not determine your location within 15 seconds."];
+    }
+  });
 }
 - (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager {
   GPSNavLog(@"Location authorization=%ld", (long)manager.authorizationStatus);
-  if (manager.authorizationStatus == kCLAuthorizationStatusAuthorizedWhenInUse ||
-      manager.authorizationStatus == kCLAuthorizationStatusAuthorizedAlways) {
-    [manager requestLocation];
-  }
+  if (manager.authorizationStatus == kCLAuthorizationStatusDenied || manager.authorizationStatus == kCLAuthorizationStatusRestricted) {
+    [manager stopUpdatingLocation];
+    if (self.pendingLocationCenter) {
+      [self finishWaitingForLocation];
+      [self message:@"Allow location access in Settings to show your current location."];
+    }
+  } else [self startLocationUpdatesIfAllowed];
 }
-- (void)locationManager:(CLLocationManager *)manager
-     didUpdateLocations:(NSArray<CLLocation *> *)locations {
-  GPSNavLog(@"Location results=%@", locations);
-  CLLocation *location = locations.lastObject;
-  if (!location)
-    return;
-  if ([self.map isKindOfClass:TileMapView.class]) {
-    TileMapView *tileMap = (TileMapView *)self.map;
-    tileMap.userCoordinate = location.coordinate;
-    tileMap.hasUserCoordinate = YES;
-    [tileMap setNeedsDisplay];
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+  for (CLLocation *location in locations) {
+    NSTimeInterval age = -location.timestamp.timeIntervalSinceNow;
+    GPSNavLog(@"Location update lat=%.8f lon=%.8f accuracy=%.2f age=%.2f", location.coordinate.latitude, location.coordinate.longitude, location.horizontalAccuracy, age);
+    [self showLocation:location];
+    if (self.pendingLocationCenter && [self isFreshLocation:location]) {
+      GPSNavLog(@"myLocation received fresh fix; centering");
+      [self finishWaitingForLocation];
+      [self centerOnCoordinate:location.coordinate];
+    }
   }
-  if (self.pendingLocationCenter) {
-    self.pendingLocationCenter = NO;
-    [self centerOnCoordinate:location.coordinate];
-  }
-  [self.locationButton setImage:[UIImage systemImageNamed:@"location.fill"]
-                       forState:UIControlStateNormal];
+  if (locations.count) [self.locationButton setImage:[UIImage systemImageNamed:@"location.fill"] forState:UIControlStateNormal];
 }
 - (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
   GPSNavLog(@"Location error=%@", error);
-  [self message:error.localizedDescription];
+  if (self.pendingLocationCenter) [self finishWaitingForLocation];
+  [self message:[NSString stringWithFormat:@"Could not determine your location: %@", error.localizedDescription]];
 }
 - (void)targetA {
   self.routeTarget = 0;
@@ -711,18 +730,14 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   BOOL active = (flags & 1) && CLLocationCoordinate2DIsValid(CLLocationCoordinate2DMake(lat, lon));
   self.moving = active && isfinite(speed) && speed > 0;
   self.course = isfinite(course) ? course : 0;
-  if ([self.map isKindOfClass:TileMapView.class]) {
-    ((TileMapView *)self.map).course = self.course;
-    [self.map setNeedsDisplay];
-  }
+  self.map.course = self.course;
+  [self.map setNeedsDisplay];
   self.speedLabel.superview.superview.hidden = !self.moving;
   self.speedLabel.text = [NSString stringWithFormat:@"%.0f km/h", speed * 3.6];
   if (active) {
     self.current.coordinate = CLLocationCoordinate2DMake(lat, lon);
     if (![self.map.annotations containsObject:self.current])
       [self.map addAnnotation:self.current];
-    MKAnnotationView *view = [self.map viewForAnnotation:self.current];
-    view.image = [self engineMarkerImage];
   } else if ([self.map.annotations containsObject:self.current]) {
     [self.map removeAnnotation:self.current];
   }
@@ -734,28 +749,6 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
                 value:active ? UIColor.systemGreenColor : UIColor.systemGrayColor
                 range:NSMakeRange(0, 1)];
   self.status.attributedText = status;
-}
-- (UIImage *)engineMarkerImage {
-  UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(44, 44)];
-  return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-    CGContextRef cg = context.CGContext;
-    if (self.moving) {
-      CGContextSaveGState(cg);
-      CGContextTranslateCTM(cg, 22, 22);
-      CGContextRotateCTM(cg, (self.course - self.map.camera.heading) * M_PI / 180.0);
-      CGContextMoveToPoint(cg, 0, -21);
-      CGContextAddLineToPoint(cg, -6, -9);
-      CGContextAddLineToPoint(cg, 6, -9);
-      CGContextClosePath(cg);
-      CGContextSetFillColorWithColor(cg, UIColor.systemBlueColor.CGColor);
-      CGContextFillPath(cg);
-      CGContextRestoreGState(cg);
-    }
-    CGContextSetFillColorWithColor(cg, UIColor.whiteColor.CGColor);
-    CGContextFillEllipseInRect(cg, CGRectMake(11, 11, 22, 22));
-    CGContextSetFillColorWithColor(cg, UIColor.systemBlueColor.CGColor);
-    CGContextFillEllipseInRect(cg, CGRectMake(14, 14, 16, 16));
-  }];
 }
 - (void)updateSelection:(CLLocationCoordinate2D)c {
   if (!self.selection) {
@@ -889,7 +882,7 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 }
 - (void)fetchJSON:(NSURL *)url completion:(void (^)(id, NSError *))completion {
   NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-  [request setValue:@"GPSNav/1.0.4" forHTTPHeaderField:@"User-Agent"];
+  [request setValue:@"GPSNav/1.0.5" forHTTPHeaderField:@"User-Agent"];
   [[[NSURLSession sharedSession]
       dataTaskWithRequest:request
         completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
@@ -992,54 +985,6 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   self.line = [MKPolyline polylineWithCoordinates:coords count:points.count];
   [self.map addOverlay:self.line level:MKOverlayLevelAboveLabels];
   free(coords);
-}
-- (MKAnnotationView *)mapView:(MKMapView *)mapView viewForAnnotation:(id<MKAnnotation>)annotation {
-  GPSNavLog(@"viewForAnnotation class=%@ coordinate=%f,%f", NSStringFromClass([(id)annotation class]), annotation.coordinate.latitude, annotation.coordinate.longitude);
-  if ([annotation isKindOfClass:MKUserLocation.class])
-    return nil;
-  if (annotation == self.current) {
-    MKAnnotationView *engineView = [mapView dequeueReusableAnnotationViewWithIdentifier:@"engine"];
-    if (!engineView)
-      engineView = [[MKAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:@"engine"];
-    engineView.annotation = annotation;
-    engineView.image = [self engineMarkerImage];
-    engineView.canShowCallout = YES;
-    return engineView;
-  }
-  MKMarkerAnnotationView *view =
-      (MKMarkerAnnotationView *)[mapView dequeueReusableAnnotationViewWithIdentifier:@"marker"];
-  if (!view)
-    view = [[MKMarkerAnnotationView alloc] initWithAnnotation:annotation reuseIdentifier:@"marker"];
-  view.annotation = annotation;
-  view.canShowCallout = YES;
-  view.markerTintColor =
-      annotation == self.start
-          ? UIColor.systemGreenColor
-          : (annotation == self.current ? UIColor.systemBlueColor : UIColor.systemRedColor);
-  view.glyphImage = annotation == self.current ? [UIImage systemImageNamed:@"location.fill"] : nil;
-  return view;
-}
-- (void)mapView:(MKMapView *)mapView regionDidChangeAnimated:(BOOL)animated {
-  GPSNavLog(@"regionDidChange center=%f,%f span=%f,%f animated=%d", mapView.region.center.latitude, mapView.region.center.longitude, mapView.region.span.latitudeDelta, mapView.region.span.longitudeDelta, animated);
-  CLLocation *location = self.locationManager.location;
-  CLLocation *center = [[CLLocation alloc] initWithLatitude:mapView.centerCoordinate.latitude
-                                                longitude:mapView.centerCoordinate.longitude];
-  BOOL centered = location && [location distanceFromLocation:center] < 25;
-  [self.locationButton setImage:[UIImage systemImageNamed:centered ? @"location.fill" : @"location"]
-                       forState:UIControlStateNormal];
-  MKAnnotationView *view = [mapView viewForAnnotation:self.current];
-  view.image = [self engineMarkerImage];
-}
-- (MKOverlayRenderer *)mapView:(MKMapView *)mapView rendererForOverlay:(id<MKOverlay>)overlay {
-  GPSNavLog(@"rendererForOverlay class=%@", NSStringFromClass([(id)overlay class]));
-  if ([overlay isKindOfClass:MKTileOverlay.class])
-    return [[MKTileOverlayRenderer alloc] initWithTileOverlay:(MKTileOverlay *)overlay];
-  MKPolylineRenderer *r = [[MKPolylineRenderer alloc] initWithPolyline:(MKPolyline *)overlay];
-  r.strokeColor = UIColor.systemBlueColor;
-  r.lineWidth = 5;
-  r.lineCap = kCGLineCapRound;
-  r.lineJoin = kCGLineJoinRound;
-  return r;
 }
 - (void)presentList:(NSString *)title
               items:(NSArray<NSString *> *)items
@@ -1365,17 +1310,13 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
 - (void)settings {
   [self
       presentList:@"Settings"
-            items:@[ @"Blacklist apps", [NSString stringWithFormat:@"Map engine: %@", self.config[@"mapEngine"]], @"About GPSNav 1.0.4" ]
+            items:@[ @"Blacklist apps", @"About GPSNav 1.0.5" ]
            symbol:@"gearshape.fill"
            select:^(NSUInteger index) {
              if (index == 0) {
                [self blacklist];
-             } else if (index == 1) {
-               self.config[@"mapEngine"] = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"] ? @"Built-in (OpenStreetMap)" : @"Apple MapKit";
-               [self applyMapTiles];
-               [self save:NO];
              } else {
-               [self sheet:@"GPSNav 1.0.4"
+               [self sheet:@"GPSNav 1.0.5"
                    actions:@[ [UIAlertAction
                                actionWithTitle:@"GitHub"
                                          style:UIAlertActionStyleDefault
@@ -1425,13 +1366,8 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   [self presentViewController:a animated:YES completion:nil];
 }
 - (void)applyMapTiles {
-  MKCoordinateRegion region = self.map ? self.map.region : MKCoordinateRegionMakeWithDistance(CLLocationCoordinate2DMake(10.7769, 106.7009), 5000, 5000);
-  [self.map removeFromSuperview];
-  BOOL apple = [self.config[@"mapEngine"] isEqual:@"Apple MapKit"];
-  self.map = apple ? MKMapView.new : (MKMapView *)TileMapView.new;
+  self.map = TileMapView.new;
   self.map.translatesAutoresizingMaskIntoConstraints = NO;
-  self.map.delegate = self;
-  if (apple) self.map.showsUserLocation = YES;
   [self.view insertSubview:self.map atIndex:0];
   [NSLayoutConstraint activateConstraints:@[
     [self.map.topAnchor constraintEqualToAnchor:self.view.topAnchor],
@@ -1439,23 +1375,11 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     [self.map.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
     [self.map.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor]
   ]];
-  [self.map setRegion:region animated:NO];
-  if (apple) {
-    UILongPressGestureRecognizer *press = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(mapTap:)];
-    press.minimumPressDuration = 0.4;
-    [self.map addGestureRecognizer:press];
-  } else {
-    __weak typeof(self) weakSelf = self;
-    ((TileMapView *)self.map).longPressHandler = ^(CLLocationCoordinate2D coordinate) {
-      [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
-      [weakSelf choose:coordinate];
-    };
-  }
-  for (id annotation in @[self.selection ?: NSNull.null, self.start ?: NSNull.null, self.end ?: NSNull.null])
-    if (annotation != NSNull.null) [self.map addAnnotation:annotation];
-  if (self.line) [self.map addOverlay:self.line level:MKOverlayLevelAboveLabels];
-  self.attribution.hidden = apple;
-  GPSNavLog(@"Map engine active=%@", self.config[@"mapEngine"]);
+  __weak typeof(self) weakSelf = self;
+  self.map.longPressHandler = ^(CLLocationCoordinate2D coordinate) {
+    [[[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleLight] impactOccurred];
+    [weakSelf choose:coordinate];
+  };
 }
 - (void)dumpMapState {
   GPSNavLog(@"Map frame=%@ hidden=%d alpha=%f window=%@ overlays=%lu annotations=%lu center=%f,%f span=%f,%f searchBar=%@", NSStringFromCGRect(self.map.frame), self.map.hidden, self.map.alpha, self.map.window, (unsigned long)self.map.overlays.count, (unsigned long)self.map.annotations.count, self.map.region.center.latitude, self.map.region.center.longitude, self.map.region.span.latitudeDelta, self.map.region.span.longitudeDelta, NSStringFromCGRect(self.searchBar.frame));
@@ -1468,22 +1392,9 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     [self dumpMapState];
   }
 }
-- (void)mapViewWillStartLoadingMap:(MKMapView *)mapView { GPSNavLog(@"willStartLoadingMap"); }
-- (void)mapViewDidFinishLoadingMap:(MKMapView *)mapView { GPSNavLog(@"didFinishLoadingMap"); }
-- (void)mapViewDidFailLoadingMap:(MKMapView *)mapView withError:(NSError *)error { GPSNavLog(@"didFailLoadingMap domain=%@ code=%ld userInfo=%@", error.domain, (long)error.code, error.userInfo); }
-- (void)mapViewWillStartRenderingMap:(MKMapView *)mapView { GPSNavLog(@"willStartRenderingMap"); }
-- (void)mapViewDidFinishRenderingMap:(MKMapView *)mapView fullyRendered:(BOOL)fullyRendered { GPSNavLog(@"didFinishRenderingMap fullyRendered=%d", fullyRendered); }
 - (void)runDiagnostics {
   GPSNavLog(@"Diagnostics started location authorization=%ld prefs=%@", (long)self.locationManager.authorizationStatus, [NSDictionary dictionaryWithContentsOfFile:path]);
   [self dumpMapState];
-  GPSNavLog(@"Metal device=%@", MTLCreateSystemDefaultDevice());
-  MKMapSnapshotOptions *options = MKMapSnapshotOptions.new;
-  options.region = self.map.region;
-  options.size = CGSizeMake(320, 320);
-  MKMapSnapshotter *snapshotter = [[MKMapSnapshotter alloc] initWithOptions:options];
-  [snapshotter startWithCompletionHandler:^(MKMapSnapshot *snapshot, NSError *error) {
-    GPSNavLog(@"Map snapshot image=%@ size=%@ error domain=%@ code=%ld userInfo=%@", snapshot.image, NSStringFromCGSize(snapshot.image.size), error.domain, (long)error.code, error.userInfo);
-  }];
   CFTypeRef (*createTask)(CFAllocatorRef) = dlsym(RTLD_DEFAULT, "SecTaskCreateFromSelf");
   CFTypeRef (*copyEntitlement)(CFTypeRef, CFStringRef, CFErrorRef *) = dlsym(RTLD_DEFAULT, "SecTaskCopyValueForEntitlement");
   CFTypeRef task = createTask && copyEntitlement ? createTask(kCFAllocatorDefault) : NULL;

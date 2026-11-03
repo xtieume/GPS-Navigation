@@ -16,6 +16,7 @@
 @property NSUInteger minuteOK;
 @property NSUInteger minuteFail;
 @property NSUInteger animationGeneration;
+@property CAShapeLayer *accuracyLayer, *haloLayer, *dotLayer;
 @end
 @implementation TileMapView
 - (instancetype)init {
@@ -24,6 +25,26 @@
   self.backgroundColor = UIColor.systemGray5Color;
   self.contentMode = UIViewContentModeRedraw;
   _zoom = 13;
+  _accuracyLayer = CAShapeLayer.layer;
+  _haloLayer = CAShapeLayer.layer;
+  _dotLayer = CAShapeLayer.layer;
+  _accuracyLayer.fillColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.15].CGColor;
+  _accuracyLayer.strokeColor = [UIColor.systemBlueColor colorWithAlphaComponent:0.3].CGColor;
+  _accuracyLayer.lineWidth = 1;
+  _haloLayer.fillColor = UIColor.systemBlueColor.CGColor;
+  _dotLayer.fillColor = UIColor.systemBlueColor.CGColor;
+  _dotLayer.strokeColor = UIColor.whiteColor.CGColor;
+  _dotLayer.lineWidth = 2;
+  _dotLayer.shadowColor = UIColor.blackColor.CGColor;
+  _dotLayer.shadowOpacity = 0.3;
+  _dotLayer.shadowRadius = 3;
+  _dotLayer.shadowOffset = CGSizeMake(0, 1);
+  for (CALayer *layer in @[_accuracyLayer, _haloLayer, _dotLayer]) {
+    layer.hidden = YES;
+    [self.layer addSublayer:layer];
+  }
+  [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updatePulse) name:UIAccessibilityReduceMotionStatusDidChangeNotification object:nil];
+  [self updatePulse];
   _markerList = NSMutableArray.new;
   _overlayList = NSMutableArray.new;
   _cache = NSCache.new;
@@ -56,15 +77,49 @@
   }];
   return self;
 }
+- (void)updatePulse {
+  [self.haloLayer removeAnimationForKey:@"pulse"];
+  if (UIAccessibilityIsReduceMotionEnabled()) { self.haloLayer.hidden = YES; return; }
+  self.haloLayer.hidden = !self.hasUserCoordinate;
+  CABasicAnimation *scale = [CABasicAnimation animationWithKeyPath:@"transform.scale"];
+  scale.fromValue = @1; scale.toValue = @3;
+  CABasicAnimation *opacity = [CABasicAnimation animationWithKeyPath:@"opacity"];
+  opacity.fromValue = @0.5; opacity.toValue = @0;
+  CAAnimationGroup *pulse = CAAnimationGroup.animation;
+  pulse.animations = @[scale, opacity]; pulse.duration = 2; pulse.repeatCount = HUGE_VALF;
+  [self.haloLayer addAnimation:pulse forKey:@"pulse"];
+}
+- (void)updateUserLayers {
+  [CATransaction begin]; [CATransaction setDisableActions:YES];
+  BOOL hidden = !self.hasUserCoordinate;
+  self.dotLayer.hidden = hidden;
+  self.accuracyLayer.hidden = hidden || self.horizontalAccuracy <= 0;
+  self.haloLayer.hidden = hidden || UIAccessibilityIsReduceMotionEnabled();
+  CGPoint point = [self convertCoordinate:self.userCoordinate toPointToView:self];
+  double radius = gps_accuracy_radius_points(self.horizontalAccuracy, self.userCoordinate.latitude, self.zoom);
+  self.accuracyLayer.position = point;
+  self.accuracyLayer.bounds = CGRectMake(0, 0, radius * 2, radius * 2);
+  self.accuracyLayer.path = [UIBezierPath bezierPathWithOvalInRect:self.accuracyLayer.bounds].CGPath;
+  self.haloLayer.position = point;
+  self.haloLayer.bounds = CGRectMake(0, 0, 18, 18);
+  self.haloLayer.path = [UIBezierPath bezierPathWithOvalInRect:self.haloLayer.bounds].CGPath;
+  self.dotLayer.position = point;
+  self.dotLayer.bounds = CGRectMake(0, 0, 18, 18);
+  self.dotLayer.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(self.dotLayer.bounds, 1, 1)].CGPath;
+  [CATransaction commit];
+}
+- (void)setUserCoordinate:(CLLocationCoordinate2D)value { _userCoordinate = value; [self updateUserLayers]; }
+- (void)setHorizontalAccuracy:(CLLocationAccuracy)value { _horizontalAccuracy = value; [self updateUserLayers]; }
+- (void)setHasUserCoordinate:(BOOL)value { _hasUserCoordinate = value; [self updateUserLayers]; }
+- (void)layoutSubviews { [super layoutSubviews]; [self updateUserLayers]; }
 - (NSArray *)annotations { return self.markerList; }
 - (NSArray *)overlays { return self.overlayList; }
 - (MKMapCamera *)camera { return MKMapCamera.camera; }
 - (double)worldSize { return 256.0 * pow(2.0, self.zoom); }
 - (void)changed {
+  [self updateUserLayers];
   [self setNeedsDisplay];
   if (self.regionChangeHandler) self.regionChangeHandler(self.region);
-  if ([self.delegate respondsToSelector:@selector(mapView:regionDidChangeAnimated:)])
-    [self.delegate mapView:(MKMapView *)self regionDidChangeAnimated:NO];
 }
 - (void)setCenterCoordinate:(CLLocationCoordinate2D)coordinate { [self setCenterCoordinate:coordinate animated:NO]; }
 - (void)setCenterCoordinate:(CLLocationCoordinate2D)coordinate animated:(BOOL)animated {
@@ -136,6 +191,7 @@
   }];
 }
 - (void)gestureChanged:(UIGestureRecognizer *)gesture {
+  [self updateUserLayers];
   CFTimeInterval now = CACurrentMediaTime();
   if (gesture.state != UIGestureRecognizerStateChanged || now - self.lastGestureDraw >= 1.0 / 30.0) {
     self.lastGestureDraw = now;
@@ -229,7 +285,7 @@
       [self.diskLoads removeObject:key];
       if (disk) { [self.cache setObject:disk forKey:key]; [self setNeedsDisplay]; return; }
       NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-      [request setValue:@"GPSNav/1.0.4" forHTTPHeaderField:@"User-Agent"];
+      [request setValue:@"GPSNav/1.0.5" forHTTPHeaderField:@"User-Agent"];
       __block NSURLSessionDataTask *task = nil;
       task = [self.session dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
         NSInteger status = [(NSHTTPURLResponse *)response statusCode];
@@ -339,13 +395,6 @@
       CGContextFillEllipseInRect(cg, CGRectMake(p.x - 9, p.y - 27, 18, 18));
       if ([title isEqual:@"A"] || [title isEqual:@"B"]) [title drawAtPoint:CGPointMake(p.x - 4, p.y - 25) withAttributes:@{NSFontAttributeName:[UIFont boldSystemFontOfSize:12], NSForegroundColorAttributeName:UIColor.whiteColor}];
     }
-  }
-  if (self.hasUserCoordinate) {
-    CGPoint p = [self convertCoordinate:self.userCoordinate toPointToView:self];
-    CGContextSetFillColorWithColor(cg, UIColor.whiteColor.CGColor);
-    CGContextFillEllipseInRect(cg, CGRectMake(p.x - 8, p.y - 8, 16, 16));
-    CGContextSetFillColorWithColor(cg, UIColor.systemBlueColor.CGColor);
-    CGContextFillEllipseInRect(cg, CGRectMake(p.x - 6, p.y - 6, 12, 12));
   }
 }
 @end

@@ -1,11 +1,12 @@
 #import <UIKit/UIKit.h>
 #import <MapKit/MapKit.h>
 @interface TileMapView : UIView
-@property (nonatomic, weak) id<MKMapViewDelegate> delegate;
 @property (nonatomic) CLLocationCoordinate2D centerCoordinate;
 @property (nonatomic) double zoom;
 @property (nonatomic) CLLocationCoordinate2D userCoordinate;
 @property (nonatomic) BOOL hasUserCoordinate;
+@property (nonatomic) CLLocationAccuracy horizontalAccuracy;
+@property (nonatomic) CLLocationDirection userCourse;
 @property (nonatomic) CGFloat course;
 @property (nonatomic, copy) void (^longPressHandler)(CLLocationCoordinate2D coordinate);
 @property (nonatomic, copy) void (^regionChangeHandler)(MKCoordinateRegion region);
