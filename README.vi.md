@@ -10,7 +10,7 @@ GPSNav mô phỏng vị trí cho iOS 16.0 trở lên đã jailbreak, hỗ trợ 
 
 - **Bản đồ**: bản đồ OpenStreetMap tích hợp, kéo, chụm và chạm đúp để zoom. Nút định vị đưa về vị trí thật kèm vòng tròn độ chính xác.
 - **Fixed**: nhấn giữ bản đồ (hoặc chọn kết quả tìm kiếm / bookmark) để chọn điểm, rồi bấm **Start spoofing**.
-- **Route**: đặt A và B, ứng dụng tìm đường theo đường thật (MapKit, dự phòng OSRM). Chọn tốc độ km/h, bật lặp đảo chiều (A→B→A…) và lưu tuyến.
+- **Route**: đặt A và B, ứng dụng tìm đường theo đường thật (MapKit, dự phòng OSRM). Chọn tốc độ km/h, bật dao động tốc độ ngẫu nhiên (±10–100%), lặp đảo chiều (A→B→A…) và lưu tuyến.
 - **Random**: nhảy tới điểm ngẫu nhiên trong bán kính quanh điểm đã chọn theo chu kỳ.
 - **Tìm kiếm** có lịch sử (dự phòng Nominatim), **Bookmarks**, **Tuyến đã lưu** và **Lịch sử** ở cột nút bên phải.
 - **Logs**: xem log tích hợp (App / Engine / Tweak), chạy chẩn đoán, sao chép và chia sẻ.

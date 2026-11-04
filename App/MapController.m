@@ -51,6 +51,8 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     @"longitude" : @106.7009,
     @"mode" : @"fixed",
     @"speed" : @40,
+    @"speedRandom" : @NO,
+    @"speedRandomPercent" : @20,
     @"radius" : @500,
     @"interval" : @30,
     @"loop" : @NO,
@@ -61,6 +63,10 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
   for (NSString *key in defaults)
     if (!self.config[key])
       self.config[key] = defaults[key];
+  NSInteger speedRandomPercent=[self.config[@"speedRandomPercent"] integerValue];
+  speedRandomPercent=MAX(10,MIN(100,speedRandomPercent));
+  self.config[@"speedRandomPercent"]=@(speedRandomPercent);
+  self.config[@"speedRandom"]=@([self.config[@"speedRandom"] boolValue]);
   self.bookmarks = [self.config[@"bookmarks"] mutableCopy] ?: NSMutableArray.new;
   self.routes = [self.config[@"savedRoutes"] mutableCopy] ?: NSMutableArray.new;
   self.history = [self.config[@"history"] mutableCopy] ?: NSMutableArray.new;
@@ -374,7 +380,11 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
     swap.accessibilityLabel = @"Swap route points";
     [row addArrangedSubview:swap];
     UIStackView *options = row;
-    UIButton *speed = [self button:[NSString stringWithFormat:@"%@", self.config[@"speed"]]
+    NSString *variationTitle=[self.config[@"speedRandom"] boolValue]
+                                 ? [NSString stringWithFormat:@" ±%@%%",self.config[@"speedRandomPercent"]]
+                                 : @"";
+    NSString *speedTitle=[NSString stringWithFormat:@"%@%@",self.config[@"speed"],variationTitle];
+    UIButton *speed = [self button:speedTitle
                             symbol:@"speedometer"
                             action:@selector(routeOptions)];
     NSMutableArray *speedActions = NSMutableArray.new;
@@ -405,6 +415,44 @@ static NSString *const path = @"/var/mobile/Library/Preferences/com.xtieume.gpsn
                                                         [self refreshControls];
                                                       }];
                                               }]];
+    NSMutableArray *variationActions=NSMutableArray.new;
+    for (NSNumber *percent in @[@10,@20,@30,@50]) {
+      NSString *title=[NSString stringWithFormat:@"±%@%%",percent];
+      [variationActions addObject:[UIAction actionWithTitle:title
+                                                       image:nil
+                                                  identifier:nil
+                                                     handler:^(__kindof UIAction *action) {
+        self.config[@"speedRandom"]=@YES;
+        self.config[@"speedRandomPercent"]=percent;
+        GPSNavLog(@"Route random speed variation enabled percent=%@",percent);
+        [self save:NO];
+        [self refreshControls];
+      }]];
+    }
+    [variationActions addObject:[UIAction actionWithTitle:@"Custom…"
+                                                     image:nil
+                                                identifier:nil
+                                                   handler:^(__kindof UIAction *action) {
+      [self numberPrompt:@"Random variation (10–100%)" value:[self.config[@"speedRandomPercent"] doubleValue] completion:^(double value) {
+        NSInteger percent=(NSInteger)round(value);
+        percent=MAX(10,MIN(100,percent));
+        self.config[@"speedRandom"]=@YES;
+        self.config[@"speedRandomPercent"]=@(percent);
+        GPSNavLog(@"Route random speed variation enabled percent=%ld",(long)percent);
+        [self save:NO];
+        [self refreshControls];
+      }];
+    }]];
+    [variationActions insertObject:[UIAction actionWithTitle:@"Off"
+                                                       image:nil
+                                                  identifier:nil
+                                                     handler:^(__kindof UIAction *action) {
+      self.config[@"speedRandom"]=@NO;
+      GPSNavLog(@"Route random speed variation disabled");
+      [self save:NO];
+      [self refreshControls];
+    }] atIndex:0];
+    [speedActions addObject:[UIMenu menuWithTitle:@"Random variation" children:variationActions]];
     [speedActions addObject:[UIAction actionWithTitle:@"Route options"
                                                 image:[UIImage systemImageNamed:@"gearshape.fill"]
                                            identifier:nil
