@@ -10,7 +10,7 @@ GPSNav is a location simulator for jailbroken iOS 16.0 and later on arm64/arm64e
 
 - **Map**: built-in OpenStreetMap map with pan, pinch and double-tap zoom. The location button centers on your real position with an accuracy circle.
 - **Fixed**: long-press the map (or pick a search result / bookmark) to choose a point, then tap **Start spoofing**.
-- **Route**: set A and B, then the app routes along real roads (MapKit directions with OSRM fallback). Choose the speed in km/h, toggle reverse loop (A→B→A…), and save the route.
+- **Route**: set A and B, then the app routes along real roads (MapKit directions with OSRM fallback). Choose the speed in km/h, enable random speed variation (±10–100%), toggle reverse loop (A→B→A…), and save the route.
 - **Random**: jumps to a random point within a radius around the selected point at a set interval.
 - **Search** with history (Nominatim fallback), **Bookmarks**, **Saved routes** and **History** from the right-hand buttons.
 - **Logs**: built-in log viewer (App / Engine / Tweak) with diagnostics, copy and share.
