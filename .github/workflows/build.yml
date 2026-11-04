@@ -12,26 +12,26 @@ permissions:
   contents: read
 jobs:
   package:
+    # ponytail: one macOS job builds both schemes; hosted macOS arm64 capacity is scarce and a second matrix job often never gets a runner
     runs-on: macos-latest
-    strategy:
-      matrix:
-        scheme: [rootless, rootful]
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools
         run: |
           brew install ldid dpkg make
           git clone --recursive https://github.com/theos/theos.git "$HOME/theos"
-      - name: Build package
+      - name: Build packages
         env:
           THEOS: /Users/runner/theos
-          SCHEME: ${{ matrix.scheme }}
         run: |
           export PATH="$(brew --prefix make)/libexec/gnubin:$PATH"
-          if [ "$SCHEME" = rootless ]; then make package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless; else make package FINALPACKAGE=1; fi
+          make clean package FINALPACKAGE=1 THEOS_PACKAGE_SCHEME=rootless
+          make clean package FINALPACKAGE=1
+          ls -l packages
       - uses: actions/upload-artifact@v4
         with:
-          name: GPSNav-${{ matrix.scheme }}
+          name: GPSNav-debs
           path: packages/*.deb
           if-no-files-found: error
   release:
